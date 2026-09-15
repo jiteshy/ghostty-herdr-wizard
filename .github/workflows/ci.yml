@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax
+        run: bash -n ghostty-herdr-wizard.sh
+      - name: ShellCheck (errors only)
+        run: shellcheck -S error ghostty-herdr-wizard.sh
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax under macOS bash 3.2
+        run: /bin/bash -n ghostty-herdr-wizard.sh
+      - name: Stage list
+        run: /bin/bash ghostty-herdr-wizard.sh --list
