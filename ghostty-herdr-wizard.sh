@@ -939,6 +939,7 @@ stage_github() {
 stage_neovim() {
   say "LazyVim with TypeScript, Tailwind, ESLint, Prettier, JSON and Markdown support,"
   say "tuned for working next to agents: auto-reload of changed files and Diffview for review."
+  note "Other languages (Python, Go, Rust, …): run :LazyExtras inside Neovim and press x to enable."
   brew_formulae neovim tree-sitter-cli
   local nvim_dir="$HOME/.config/nvim" fresh=false
   local lazy_lua="$nvim_dir/lua/config/lazy.lua"
@@ -971,7 +972,7 @@ stage_neovim() {
     { import = "lazyvim.plugins.extras.linting.eslint" },
     { import = "lazyvim.plugins.extras.formatting.prettier" },'
   if grep -q 'extras.lang.typescript' "$lazy_lua"; then
-    ok "frontend extras already enabled"
+    ok "language extras already enabled"
   else
     EXTRAS="$extras" awk '{print} /import = "lazyvim.plugins" }/ && !done {print ENVIRON["EXTRAS"]; done=1}' \
       "$lazy_lua" > "$lazy_lua.new"
@@ -1392,7 +1393,7 @@ stage_tour_tabs() {
   printf '\n'
   step "In repo A: prefix Shift-T, rename the tab with Claude in it to 'agents'."
   step "Cmd-T for a new tab, prefix Shift-T to name it 'code', run:  v ."
-  step "Cmd-T again, name it 'dev', start the dev server (e.g. pnpm dev). Cmd-D and run the"
+  step "Cmd-T again, name it 'dev', start the dev server (e.g. npm run dev). Cmd-D and run the"
   step "tests in watch mode on the right."
   step "Cmd-1 / Cmd-2 / Cmd-3 jump between tabs. prefix n / p cycles through them."
   printf '\n'
@@ -1690,7 +1691,7 @@ case "${1:-}" in
   *) usage; exit 2 ;;
 esac
 
-banner "Ghostty + herdr frontend terminal"
+banner "Ghostty + herdr terminal for coding agents"
 for entry in "${STAGES[@]}"; do
   if (( _STAGE_INDEX + 1 < FROM )) ||
     [[ -n "$ONLY" && "$ONLY" != *",$((_STAGE_INDEX + 1)),"* ]] ||

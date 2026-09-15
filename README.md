@@ -1,6 +1,6 @@
 # ghostty-herdr-wizard
 
-An interactive setup wizard that turns a Mac into a terminal-first workspace for frontend development with coding agents. You get [Ghostty](https://ghostty.org) with a Nerd Font, [herdr](https://herdr.dev) managing one workspace per repo with Claude Code and Codex sessions side by side, readable git diffs, LazyVim for reading and reviewing code, and a guided tour that teaches the whole thing hands-on.
+An interactive setup wizard that turns a Mac into a terminal-first workspace for software development with coding agents. You get [Ghostty](https://ghostty.org) with a Nerd Font, [herdr](https://herdr.dev) managing one workspace per repo with Claude Code and Codex sessions side by side, readable git diffs, LazyVim for reading and reviewing code, and a guided tour that teaches the whole thing hands-on.
 
 ![Pastel powerline prompt: Apple logo, folder, git branch, Node version, time](docs/images/prompt.png)
 
@@ -24,7 +24,7 @@ It's a single bash script. It installs with Homebrew, writes config files, walks
 **Git and code review**
 - delta for syntax-highlighted diffs, difftastic for structural diffs (`git dft`)
 - lazygit in a popup, with delta and difftastic as switchable renderers
-- LazyVim with TypeScript, Tailwind, ESLint, Prettier, JSON and Markdown support
+- LazyVim with TypeScript, Tailwind, ESLint, Prettier, JSON and Markdown support out of the box; add Python, Go, Rust and other languages with `:LazyExtras`
 - Neovim tuned for working next to agents: files an agent edits reload by themselves, and Diffview reviews all changes (`Space g v`)
 - gh-dash for pull requests and issues in the terminal
 
