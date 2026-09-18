@@ -201,7 +201,11 @@ HERDR_BIN="$BREW_PREFIX/bin/herdr"
 LAUNCHER="$HOME/.local/bin/ghostty-launch"
 CHEATSHEET="$HOME/.config/ghostty-herdr-cheatsheet.md"
 STATUSLINE="$HOME/.claude/statusline.sh"
+HERDR_PLUGIN_DIR="$HOME/.herdr/plugins/worktree-tabs"
 CHANGED=() # files this run created or modified
+
+# Tabs opened on every new workspace and worktree. Empty disables the plugin.
+DEFAULT_TABS="agents,code,dev server,git review"
 
 ok()  { printf '  %s✓%s %s\n' "$GREEN" "$RESET" "$1"; }
 cmd() { printf '  %s$ %s%s\n' "$DIM" "$*" "$RESET"; }
@@ -351,8 +355,8 @@ font-family = JetBrainsMono Nerd Font
 font-size = 14
 
 # ── Look ──────────────────────────────────────────────
-# Follows macOS light/dark mode, same palette as herdr, nvim, bat and yazi.
-theme = light:Catppuccin Latte,dark:Catppuccin Mocha
+# Always dark, same palette as herdr, nvim, bat and yazi.
+theme = Catppuccin Mocha
 window-padding-x = 10
 window-padding-y = 8
 window-padding-balance = true
@@ -634,7 +638,7 @@ stage_install_ghostty() {
 }
 
 stage_ghostty_config() {
-  say "Font, Catppuccin theme (follows macOS light/dark), Option-as-Alt, quick terminal,"
+  say "Font, Catppuccin Mocha theme (always dark), Option-as-Alt, quick terminal,"
   say "and Cmd shortcuts that drive herdr."
   write_ghostty_config
   if "$GHOSTTY_BIN" +list-fonts 2>/dev/null | grep "JetBrainsMono Nerd Font" >/dev/null; then
@@ -770,7 +774,7 @@ export EDITOR=nvim VISUAL=nvim
 EOF
     printf 'export PROJECTS_DIR="%s"\n' "$projects_line"
     cat <<'EOF'
-export BAT_THEME_DARK="Catppuccin Mocha" BAT_THEME_LIGHT="Catppuccin Latte"
+export BAT_THEME="Catppuccin Mocha"
 EOF
   )
   upsert_block "$HOME/.zshrc" <<'EOF'
@@ -986,9 +990,9 @@ stage_neovim() {
   fi
 
   install_file "$nvim_dir/lua/plugins/colorscheme.lua" <<'EOF'
--- Catppuccin; the flavour follows the terminal's light/dark background.
+-- Catppuccin Mocha, fixed dark to match Ghostty, herdr, bat and yazi.
 return {
-  { "LazyVim/LazyVim", opts = { colorscheme = "catppuccin" } },
+  { "LazyVim/LazyVim", opts = { colorscheme = "catppuccin-mocha" } },
 }
 EOF
   install_file "$nvim_dir/lua/plugins/diffview.lua" <<'EOF'
@@ -1056,7 +1060,7 @@ stage_yazi() {
     install_file "$HOME/.config/yazi/theme.toml" <<'EOF'
 [flavor]
 dark = "catppuccin-mocha"
-light = "catppuccin-latte"
+light = "catppuccin-mocha"
 EOF
   else
     SKIPPED+=("yazi Catppuccin flavours: ya pkg add yazi-rs/flavors:catppuccin-mocha")
@@ -1064,11 +1068,225 @@ EOF
   pause
 }
 
+# ask_default_tabs: decide which tabs new workspaces and worktrees open with.
+# Sets DEFAULT_TABS to a comma-separated list, or empty to turn the plugin off.
+ask_default_tabs() {
+  if ! confirm "Open a default set of tabs on every new workspace and worktree?"; then
+    DEFAULT_TABS=""
+    return 0
+  fi
+  say "The default set is:"
+  local item
+  local oldifs="$IFS"; IFS=','; local shown=($DEFAULT_TABS); IFS="$oldifs"
+  for item in "${shown[@]}"; do step "$item"; done
+  if confirm "Use those?"; then
+    return 0
+  fi
+  local TAB_LIST=""
+  ask TAB_LIST "Tab names, comma separated:"
+  if [[ -n "$TAB_LIST" ]]; then
+    DEFAULT_TABS="$TAB_LIST"
+  else
+    note "nothing entered, keeping the default set"
+  fi
+}
+
+# write_worktree_tabs_plugin: install and register the herdr plugin that opens
+# DEFAULT_TABS whenever a workspace or a worktree is created.
+write_worktree_tabs_plugin() {
+  local item labels=""
+  local oldifs="$IFS"; IFS=','; local parts=($DEFAULT_TABS); IFS="$oldifs"
+  for item in "${parts[@]}"; do
+    item="${item#"${item%%[![:space:]]*}"}"   # trim leading spaces
+    item="${item%"${item##*[![:space:]]}"}"   # trim trailing spaces
+    [[ -z "$item" ]] && continue
+    labels+=" $(printf '%q' "$item")"
+  done
+  if [[ -z "$labels" ]]; then
+    warn "no usable tab names, skipping the plugin"
+    return 0
+  fi
+
+  install_file "$HERDR_PLUGIN_DIR/herdr-plugin.toml" <<'EOF'
+# herdr plugin, written by ghostty-herdr-wizard.sh
+# Opens a standard set of tabs whenever a workspace or worktree is created.
+# Re-run the wizard to change the tab list, or edit apply-tab-layout.sh.
+id = "worktree-tabs"
+name = "Worktree Tabs"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Open a standard tab layout in new workspaces and worktrees"
+platforms = ["macos", "linux"]
+
+# herdr worktree create fires both events, so each handler claims one case:
+# the workspace handler ignores linked worktrees and the worktree handler
+# only takes those. That way the tabs are never created twice.
+[[events]]
+on = "workspace.created"
+command = ["bash", "apply-tab-layout.sh", "workspace"]
+
+[[events]]
+on = "worktree.created"
+command = ["bash", "apply-tab-layout.sh", "worktree"]
+EOF
+
+  # Built in a temp file rather than a process substitution: bash cannot parse
+  # heredocs nested inside <( ).
+  local hook; hook=$(mktemp)
+  {
+    cat <<'HEAD'
+#!/usr/bin/env bash
+# Written by ghostty-herdr-wizard.sh. Runs as a herdr event hook.
+#
+# herdr runs hooks under macOS system bash 3.2, so this stays 3.2-compatible:
+# no mapfile, no associative arrays.
+set -uo pipefail
+
+# The herdr server may have been started without Homebrew on PATH.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+
+HEAD
+    printf '# The tabs to open. Edit this line to change them.\ntab_labels=(%s)\n\n' "$labels"
+    cat <<'TAIL'
+mode="${1:-workspace}"
+herdr_bin="${HERDR_BIN_PATH:-herdr}"
+state_dir="${HERDR_PLUGIN_STATE_DIR:-$HOME/.herdr/plugins/worktree-tabs}"
+
+# Keep the last event of each kind on disk. herdr shows hook output in
+# `herdr plugin log list`, but the raw payload is what you want when the
+# layout doesn't appear.
+mkdir -p "$state_dir/logs"
+printf '%s\n' "${HERDR_PLUGIN_EVENT_JSON:-}" > "$state_dir/logs/last-$mode-event.json"
+
+# The workspace id arrives as an env var for most invocations. Fall back to
+# walking the event payload, whose shape differs between the two events.
+workspace_id="${HERDR_WORKSPACE_ID:-}"
+if [[ -z "$workspace_id" ]]; then
+  workspace_id=$(python3 -c '
+import json, os, sys
+
+def walk(node):
+    if isinstance(node, dict):
+        value = node.get("workspace_id")
+        if isinstance(value, str) and value:
+            return value
+        for child in node.values():
+            found = walk(child)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for child in node:
+            found = walk(child)
+            if found:
+                return found
+    return None
+
+try:
+    payload = json.loads(os.environ.get("HERDR_PLUGIN_EVENT_JSON") or "{}")
+except ValueError:
+    sys.exit(0)
+sys.stdout.write(walk(payload) or "")
+') || workspace_id=""
+fi
+[[ -n "$workspace_id" ]] || exit 0
+
+# Read the workspace back from herdr rather than trusting the event payload:
+# it is authoritative about the tab count and about whether this is a linked
+# worktree. Creation events can land a moment before the workspace is listed.
+facts=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  facts=$("$herdr_bin" workspace list 2>/dev/null | workspace_id="$workspace_id" python3 -c '
+import json, os, sys
+
+wanted = os.environ["workspace_id"]
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    sys.exit(0)
+for workspace in data.get("result", {}).get("workspaces", []):
+    if workspace.get("workspace_id") != wanted:
+        continue
+    worktree = workspace.get("worktree") or {}
+    print("%s|%s|%s" % (
+        "linked" if worktree.get("is_linked_worktree") else "plain",
+        workspace.get("active_tab_id") or "",
+        workspace.get("tab_count") or 0,
+    ))
+    break
+') || facts=""
+  [[ -n "$facts" ]] && break
+  sleep 0.2
+done
+[[ -n "$facts" ]] || exit 0
+
+IFS='|' read -r kind active_tab tab_count <<< "$facts"
+
+# A linked worktree belongs to the worktree handler, everything else to the
+# workspace handler. `herdr worktree create` emits both events.
+if [[ "$mode" == "worktree" && "$kind" != "linked" ]]; then exit 0; fi
+if [[ "$mode" == "workspace" && "$kind" == "linked" ]]; then exit 0; fi
+
+# Only lay out a workspace that is still on its single starting tab, so a
+# duplicate event or a manual re-run can't stack a second set of tabs.
+[[ "$tab_count" == "1" && -n "$active_tab" ]] || exit 0
+
+# New tabs inherit the plugin's own directory unless told otherwise, so take
+# the cwd from the pane herdr just opened.
+cwd=$("$herdr_bin" pane list --workspace "$workspace_id" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    sys.exit(0)
+for pane in data.get("result", {}).get("panes", []):
+    if pane.get("cwd"):
+        sys.stdout.write(pane["cwd"])
+        break
+') || cwd=""
+
+# The workspace already has its first tab; rename it instead of adding a fifth.
+"$herdr_bin" tab rename "$active_tab" "${tab_labels[0]}" >/dev/null 2>&1
+
+index=1
+while (( index < ${#tab_labels[@]} )); do
+  if [[ -n "$cwd" ]]; then
+    "$herdr_bin" tab create --workspace "$workspace_id" --label "${tab_labels[$index]}" \
+      --cwd "$cwd" --no-focus >/dev/null 2>&1
+  else
+    "$herdr_bin" tab create --workspace "$workspace_id" --label "${tab_labels[$index]}" \
+      --no-focus >/dev/null 2>&1
+  fi
+  index=$(( index + 1 ))
+done
+
+# Land on the first tab, not the last one created.
+"$herdr_bin" tab focus "$active_tab" >/dev/null 2>&1
+exit 0
+TAIL
+  } > "$hook"
+  install_file "$HERDR_PLUGIN_DIR/apply-tab-layout.sh" < "$hook"
+  rm -f "$hook"
+  chmod +x "$HERDR_PLUGIN_DIR/apply-tab-layout.sh" 2>/dev/null || true
+
+  # Register with the running server. Linking also works with no server up.
+  if herdr plugin list 2>/dev/null | grep -q worktree-tabs; then
+    run herdr plugin unlink worktree-tabs
+  fi
+  if herdr plugin link "$HERDR_PLUGIN_DIR"; then
+    ok "plugin linked: new workspaces and worktrees open ${DEFAULT_TABS}"
+  else
+    warn "couldn't register the plugin with herdr"
+    SKIPPED+=("link the tab plugin: herdr plugin link $HERDR_PLUGIN_DIR")
+  fi
+}
+
 stage_herdr() {
   say "herdr runs your terminals in a background server: one workspace per repo, tabs"
   say "and panes inside, and a sidebar showing which agents are working, idle or"
   say "waiting for you. Closing Ghostty never stops them."
   note "terminal-notifier delivers herdr's desktop notifications (see the notifications stage)."
+  note "A small herdr plugin can also give every new workspace and worktree the same"
+  note "set of tabs. You choose the tabs at the end of this stage."
   brew_formulae herdr terminal-notifier
   install_file "$HOME/.config/herdr/config.toml" <<'EOF'
 # herdr config, written by ghostty-herdr-wizard.sh
@@ -1083,9 +1301,7 @@ new_cwd = "follow"
 
 [theme]
 name = "catppuccin"
-auto_switch = true
-dark_name = "catppuccin"
-light_name = "catppuccin-latte"
+auto_switch = false
 
 [keys]
 # Claude Code keeps Ctrl-B for backgrounding commands.
@@ -1095,6 +1311,13 @@ previous_agent = "prefix+shift+a"
 previous_workspace = "prefix+comma"
 next_workspace = "prefix+period"
 last_pane = "prefix+space"
+# jumps to whatever raised the latest notification
+open_notification_target = "prefix+o"
+# Worktrees. new_worktree is herdr's own default; the other two are unset
+# out of the box. Shift-R is reload_config and Shift-D closes a workspace,
+# so removal sits on Shift-K to keep it away from both.
+open_worktree = "prefix+shift+o"
+remove_worktree = "prefix+shift+k"
 
 [[keys.command]]
 key = "prefix+m"
@@ -1161,6 +1384,20 @@ EOF
   else
     warn "herdr reported config problems (above)"
     SKIPPED+=("fix herdr config: herdr config check")
+  fi
+  printf '\n'
+  say "Default tab layout plugin..."
+  ask_default_tabs
+  if [[ -n "$DEFAULT_TABS" ]]; then
+    write_worktree_tabs_plugin
+  else
+    if herdr plugin list 2>/dev/null | grep -q worktree-tabs; then
+      run herdr plugin unlink worktree-tabs
+      note "new workspaces go back to a single tab"
+    else
+      note "new workspaces keep herdr's single starting tab"
+    fi
+    SKIPPED+=("default tabs on new workspaces: re-run this stage to turn them on")
   fi
   pause
 }
@@ -1377,6 +1614,7 @@ stage_tour_agents() {
   say "Two agents on one repo without clashing:"
   step "Select repo A in the sidebar, press prefix Shift-G, give a branch name. herdr creates a"
   step "worktree workspace (under ~/.herdr/worktrees). Run a second claude there."
+  step "prefix Shift-O reopens an existing worktree; prefix Shift-K deletes a checkout."
   printf '\n'
   note "Agents can drive herdr too. Ask Claude: 'start the dev server in a herdr pane next to you"
   note "and tell me when it is ready'."
@@ -1386,16 +1624,19 @@ stage_tour_agents() {
 stage_tour_tabs() {
   say "Inside one repo, give each kind of work its own tab so every view stays put:"
   printf '\n'
-  note "  1 agents   Claude / Codex sessions"
-  note "  2 code     nvim (with an agent beside it, next step)"
-  note "  3 dev      dev server │ test watcher"
-  note "  4 review   gds, lazygit, git log"
+  note "  1 agents       Claude / Codex sessions"
+  note "  2 code         nvim (with an agent beside it, next step)"
+  note "  3 dev server   dev server │ test watcher"
+  note "  4 git review   gds, lazygit, git log"
   printf '\n'
-  step "In repo A: prefix Shift-T, rename the tab with Claude in it to 'agents'."
-  step "Cmd-T for a new tab, prefix Shift-T to name it 'code', run:  v ."
-  step "Cmd-T again, name it 'dev', start the dev server (e.g. npm run dev). Cmd-D and run the"
-  step "tests in watch mode on the right."
+  say "If you said yes to the default tab layout, every new workspace and worktree already"
+  say "opens with these, so there is nothing to set up per repo:"
+  printf '\n'
+  step "In the 'code' tab run:  v .   to bring up nvim."
+  step "In 'dev server' start the dev server (e.g. npm run dev). Cmd-D and run the tests in"
+  step "watch mode on the right."
   step "Cmd-1 / Cmd-2 / Cmd-3 jump between tabs. prefix n / p cycles through them."
+  step "prefix Shift-T renames a tab, Cmd-T adds one."
   printf '\n'
   note "New tabs and splits open in the directory of the pane you're in."
   note "Keep the same tab order in every repo, and Cmd-1…4 mean the same thing everywhere."
@@ -1530,10 +1771,16 @@ Open any time with `keys`. **prefix** = Ctrl-Space: press, release, then the key
 | prefix `a` / `A` | next / previous agent (find the one waiting for you) |
 | prefix `o` | jump to the latest notification |
 | prefix `Shift-G` | new git worktree: a second agent on the same repo, own branch |
+| prefix `Shift-O` | open an existing worktree of the selected repo |
+| prefix `Shift-K` | delete a worktree checkout (asks first) |
 | prefix `Shift-W` / `Shift-D` | rename / close workspace |
 | prefix `?` | every keybinding |
 
 ## Tabs and panes
+
+New workspaces and worktrees open with a standard set of tabs. Change the list by
+re-running the wizard's herdr stage, or edit
+`~/.herdr/plugins/worktree-tabs/apply-tab-layout.sh`.
 
 | Keys | Action |
 |---|---|
