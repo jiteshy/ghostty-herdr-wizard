@@ -152,6 +152,36 @@ test_revert_restores_modified_files_and_archives_journal() {
   cleanup
 }
 
+test_revert_keeps_backups_of_files_it_did_not_revert() {
+  new_home
+  mkdir -p "$H/.config/ghostty"
+  printf 'mine\n' > "$H/.config/ghostty/config"
+  printf 'my zshrc\n' > "$H/.zshrc"
+  cp "$H/.zshrc" "$T/original"
+  wizard 'journal_init; printf "wizard zshrc\n" | install_file "$HOME/.zshrc"
+    JOURNALING=1; printf "wizard\n" | install_file "$HOME/.config/ghostty/config"'
+  wizard 'revert_all'
+  same_bytes "$STATE/backups/.zshrc" "$T/original" "unjournaled original stays in the store"
+  check "[[ ! -e '$STATE/backups/.config/ghostty/config' ]]" "reverted path's backup archived"
+  wizard 'journal_init; printf "wizard zshrc v2\n" | install_file "$HOME/.zshrc"'
+  same_bytes "$STATE/backups/.zshrc" "$T/original" "next run still doesn't capture the wizard's output"
+  cleanup
+}
+
+test_failed_restore_keeps_journal_and_leaves_file_alone() {
+  new_home
+  mkdir -p "$H/.config/ghostty"
+  printf 'mine\n' > "$H/.config/ghostty/config"
+  wizard 'journal_init; JOURNALING=1; printf "wizard\n" | install_file "$HOME/.config/ghostty/config"'
+  rm -f "$STATE/backups/.config/ghostty/config"
+  cp "$H/.config/ghostty/config" "$T/wizard-version"
+  cli --revert
+  same_bytes "$H/.config/ghostty/config" "$T/wizard-version" "file left as it was"
+  check "[[ -s '$STATE/journal.tsv' ]]" "journal kept for a retry"
+  check "grep -q 'still to do by hand' '$T/out'" "--revert lists what's left to do"
+  cleanup
+}
+
 test_revert_keeps_the_wizards_version_instead_of_deleting_it() {
   new_home
   mkdir -p "$H/.config/ghostty"

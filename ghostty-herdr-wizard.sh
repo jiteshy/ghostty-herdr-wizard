@@ -209,7 +209,8 @@ LAUNCHER="$HOME/.local/bin/ghostty-launch"
 CHEATSHEET="$HOME/.config/ghostty-herdr-cheatsheet.md"
 STATUSLINE="$HOME/.claude/statusline.sh"
 HERDR_PLUGIN_DIR="$HOME/.herdr/plugins/worktree-tabs"
-CHANGED=() # files this run created or modified
+CHANGED=()   # files this run created or modified
+BACKED_UP=() # paths this run copied into the backup store
 
 # Tabs opened on every new workspace and worktree. Empty disables the plugin.
 DEFAULT_TABS="agents,code,dev server,git review"
@@ -306,12 +307,10 @@ journal_write() {
   else
     type=CREATE
   fi
-  if [[ "$type" == MODIFY ]]; then
-    ref=$(backup_ref "$path")
-    printf '%s\tMODIFY\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$path" "$ref" "$hash" >> "$JOURNAL"
-  else
-    printf '%s\tCREATE\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$path" "$hash" >> "$JOURNAL"
-  fi
+  # MODIFY carries the backup ref before the sha; CREATE has no backup.
+  ref=""
+  [[ "$type" == MODIFY ]] && ref="$(backup_ref "$path")"$'\t'
+  printf '%s\t%s\t%s\t%s%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$type" "$path" "$ref" "$hash" >> "$JOURNAL"
 }
 
 # backup PATH: copy a file or directory into the backup store, but only the
@@ -326,54 +325,72 @@ backup() {
   journal_entry "$1" >/dev/null && return 0
   mkdir -p "$(dirname "$BACKUP_DIR/$ref")"
   cp -Rp "$1" "$BACKUP_DIR/$ref"
+  BACKED_UP+=("$1")
   note "backed up $1 → $BACKUP_DIR/$ref"
 }
 
-# revert_all: undo every journaled change, newest first, then archive the
-# journal and backups so a later run starts clean. Replaced content is moved
-# under reverted/<stamp>/, never deleted.
+# restore_backup PATH REF STAMP: put the backup at REF back at PATH. The copy is
+# staged next to PATH first, so a failed copy leaves PATH untouched; whatever
+# was at PATH is moved under reverted/STAMP/, never deleted.
+restore_backup() {
+  local path="$1" ref="$2" stamp="$3" staged aside
+  [[ -e "$BACKUP_DIR/$ref" ]] || return 1
+  staged="$path.ghostty-herdr-wizard-restore"
+  mkdir -p "$(dirname "$path")"
+  cp -Rp "$BACKUP_DIR/$ref" "$staged" || return 1
+  if [[ -e "$path" ]]; then
+    aside="$STATE_DIR/reverted/$stamp/$(backup_ref "$path")"
+    mkdir -p "$(dirname "$aside")"
+    mv "$path" "$aside"
+  fi
+  mv "$staged" "$path"
+}
+
+# revert_all: undo every journaled change, newest first. When all of it went
+# back, archive the journal and the backups it used, so a later run starts
+# clean. Backups taken by stages that don't journal yet stay in the store. If
+# anything failed, nothing is archived and --revert can simply be run again.
 revert_all() {
   if [[ ! -s "$JOURNAL" ]]; then
     say "Nothing to revert: the wizard has no record of changing anything on this machine."
     return 0
   fi
-  local stamp seen=$'\n' restored=0 ts type path ref aside
+  local stamp seen=$'\n' refs=() restored=0 failed=0 type path ref archive ref_used
   stamp=$(date +%Y%m%d-%H%M%S)
-  while IFS=$'\t' read -r ts type path ref _; do
+  while IFS=$'\t' read -r _ type path ref _; do
     case "$seen" in *$'\n'"$path"$'\n'*) continue ;; esac
     seen="$seen$path"$'\n'
     case "$type" in
       MODIFY)
-        if [[ ! -e "$BACKUP_DIR/$ref" ]]; then
-          warn "no backup for $path (expected $BACKUP_DIR/$ref), left as is"
-          SKIPPED+=("restore $path by hand")
-          continue
-        fi
-        if [[ -e "$path" ]]; then
-          aside="$STATE_DIR/reverted/$stamp/$(backup_ref "$path")"
-          mkdir -p "$(dirname "$aside")"
-          mv "$path" "$aside"
-        fi
-        mkdir -p "$(dirname "$path")"
-        if cp -Rp "$BACKUP_DIR/$ref" "$path"; then
+        if restore_backup "$path" "$ref" "$stamp"; then
           ok "restored $path"
+          refs+=("$ref")
           restored=$((restored + 1))
         else
-          warn "couldn't restore $path from $BACKUP_DIR/$ref"
+          warn "couldn't restore $path from $BACKUP_DIR/$ref, left as is"
           SKIPPED+=("restore $path from $BACKUP_DIR/$ref")
+          failed=$((failed + 1))
         fi
         ;;
       CREATE) note "left in place, created by the wizard: $path" ;;
       *) warn "unrecognised journal entry '$type' for $path, skipped" ;;
     esac
   done < <(awk '{ line[NR] = $0 } END { for (i = NR; i > 0; i--) print line[i] }' "$JOURNAL")
-  mkdir -p "$STATE_DIR/archive/$stamp"
-  mv "$JOURNAL" "$STATE_DIR/archive/$stamp/journal.tsv"
-  [[ -d "$BACKUP_DIR" ]] && mv "$BACKUP_DIR" "$STATE_DIR/archive/$stamp/backups"
   printf '\n'
   ok "restored $restored file(s)"
   [[ -d "$STATE_DIR/reverted/$stamp" ]] && note "the wizard's versions were moved to $STATE_DIR/reverted/$stamp"
-  note "journal and backups archived to $STATE_DIR/archive/$stamp"
+  if (( failed )); then
+    warn "$failed file(s) could not be restored; the journal is kept, so fix that and run --revert again"
+    return 0
+  fi
+  archive="$STATE_DIR/archive/$stamp"
+  mkdir -p "$archive"
+  mv "$JOURNAL" "$archive/journal.tsv"
+  for ref_used in ${refs[@]+"${refs[@]}"}; do
+    mkdir -p "$(dirname "$archive/backups/$ref_used")"
+    mv "$BACKUP_DIR/$ref_used" "$archive/backups/$ref_used"
+  done
+  note "journal and the backups it used archived to $archive"
 }
 
 # install_file DEST < content: write DEST if it differs. An existing file that
@@ -392,6 +409,7 @@ install_file() {
     warn "$dest already exists and differs:"
     diff -u "$dest" "$tmp" | head -40 | sed 's/^/    /' || true
     # content arrived on stdin, so the prompt must read the keyboard directly
+    # (GHW_TTY lets the tests answer it from a file)
     if ! confirm "Replace it? (a backup is kept)" < "${GHW_TTY:-/dev/tty}"; then
       rm -f "$tmp"
       SKIPPED+=("left $dest unchanged")
@@ -2051,6 +2069,10 @@ case "${1:-}" in
   --revert)
     printf '\n%s%s  Revert%s\n\n' "$BOLD" "$BLUE" "$RESET"
     revert_all
+    if (( ${#SKIPPED[@]} )); then
+      printf '\n'; warn "still to do by hand:"
+      for s in "${SKIPPED[@]}"; do note "  - $s"; done
+    fi
     printf '\n'
     exit 0
     ;;
@@ -2079,7 +2101,7 @@ if (( ${#CHANGED[@]} )); then
   note "files created or changed:"
   for f in "${CHANGED[@]}"; do note "  - $f"; done
 fi
-if [[ -n "$(ls -A "$BACKUP_DIR" 2>/dev/null)" ]]; then
+if (( ${#BACKED_UP[@]} )); then
   note "backups of what was there before: $BACKUP_DIR"
 fi
 printf '\n  Run %skeys%s for the cheat sheet. Replay the tour: bash %s --tour\n\n' "$BOLD" "$RESET" "$SCRIPT_PATH"
