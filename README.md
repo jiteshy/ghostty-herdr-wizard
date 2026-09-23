@@ -3,7 +3,7 @@
 **One bash script sets up a Mac terminal that runs your coding agents.**
 
 The script installs and configures the terminal, the tools and the agent integrations. It then shows you how to use them.
-
+test change
 After it runs, you can:
 
 - keep every repo open in the same window, and move between them with one key
