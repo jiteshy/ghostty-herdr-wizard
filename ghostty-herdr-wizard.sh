@@ -211,7 +211,8 @@ choice_get() {
 choice_set() {
   local tmp
   mkdir -p "$STATE_DIR"
-  tmp=$(mktemp)
+  # Same directory as the target, so the mv is atomic.
+  tmp=$(mktemp "$STATE_DIR/choices.XXXXXX")
   grep -vE "^${1}=" "$CHOICES" > "$tmp" 2>/dev/null || true
   printf '%s=%s\n' "$1" "$2" >> "$tmp"
   mv "$tmp" "$CHOICES"
@@ -1207,13 +1208,61 @@ stage_github() {
 # nvim_icons_plugin: LazyVim's icon provider, set by the glyph switch. Written
 # either way, so switching back to icons later undoes the ASCII fallback.
 nvim_icons_plugin() {
-  local style=ascii
-  [[ "$GLYPHS" == on ]] && style=glyph
-  cat <<EOF
+  if [[ "$GLYPHS" == on ]]; then
+    cat <<'EOF'
 -- File and folder icons: "glyph" needs a Nerd Font, "ascii" works in any font.
 -- Written by ghostty-herdr-wizard.sh from its Nerd Font + icons choice.
 return {
-  { "nvim-mini/mini.icons", opts = { style = "$style" } },
+  { "nvim-mini/mini.icons", opts = { style = "glyph" } },
+}
+EOF
+    return 0
+  fi
+  cat <<'EOF'
+-- Plain text: no Nerd Font. Written by ghostty-herdr-wizard.sh from its
+-- Nerd Font + icons choice; re-run the wizard with icons on to undo.
+--
+-- LazyVim's own icons (diagnostics, git signs, completion kinds) are replaced
+-- one by one. The kind names are LazyVim's at the time of writing; a kind it
+-- adds later keeps its glyph.
+local kinds = {}
+for _, kind in ipairs({
+  "Array", "Boolean", "Class", "Codeium", "Color", "Control", "Collapsed",
+  "Constant", "Constructor", "Copilot", "Enum", "EnumMember", "Event", "Field",
+  "File", "Folder", "Function", "Interface", "Key", "Keyword", "Method",
+  "Module", "Namespace", "Null", "Number", "Object", "Operator", "Package",
+  "Property", "Reference", "Snippet", "String", "Struct", "Supermaven",
+  "TabNine", "Text", "TypeParameter", "Unit", "Value", "Variable",
+}) do
+  kinds[kind] = ""
+end
+
+return {
+  { "nvim-mini/mini.icons", opts = { style = "ascii" } },
+  {
+    "LazyVim/LazyVim",
+    opts = {
+      icons = {
+        misc = { dots = "..." },
+        ft = { octo = "", gh = "", ["markdown.gh"] = "" },
+        dap = {
+          Stopped = { "> ", "DiagnosticWarn", "DapStoppedLine" },
+          Breakpoint = "B ",
+          BreakpointCondition = "C ",
+          BreakpointRejected = { "R ", "DiagnosticError" },
+          LogPoint = ".>",
+        },
+        diagnostics = { Error = "E ", Warn = "W ", Hint = "H ", Info = "I " },
+        git = { added = "+ ", modified = "~ ", removed = "- " },
+        kinds = kinds,
+      },
+    },
+  },
+  -- lualine's default separators are powerline glyphs.
+  {
+    "nvim-lualine/lualine.nvim",
+    opts = { options = { component_separators = "|", section_separators = "" } },
+  },
 }
 EOF
 }
@@ -1336,14 +1385,30 @@ EOF
   [[ "$GLYPHS" == on ]] && return 0
   cat <<'EOF'
 
-# Plain text: no Nerd Font icons or powerline separators.
+# Plain text: every glyph in yazi's default theme, replaced.
 [tabs]
 sep_inner = { open = "[", close = "]" }
 sep_outer = { open = "", close = "" }
 
+[indicator]
+padding = { open = "", close = "" }
+
 [status]
 sep_left  = { open = "", close = "" }
 sep_right = { open = "", close = "" }
+
+[which]
+separator = " - "
+
+[notify]
+icon_info  = "i"
+icon_warn  = "!"
+icon_error = "x"
+
+[cmp]
+icon_file    = ""
+icon_folder  = "/"
+icon_command = ">"
 
 [icon]
 globs = []
@@ -2184,7 +2249,7 @@ STAGES=(
   "stage_move_into_ghostty:Move into Ghostty"
   "stage_free_ctrl_space:Free up Ctrl-Space for herdr"
   "stage_toolbelt:CLI toolbelt"
-  "stage_starship:Starship prompt (pastel powerline)"
+  "stage_starship:Starship prompt"
   "stage_shell:Shell: history search, aliases, project jumper"
   "stage_git_diffs:Git diffs: delta and difftastic"
   "stage_lazygit:lazygit"

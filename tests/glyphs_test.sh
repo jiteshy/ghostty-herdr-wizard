@@ -77,6 +77,11 @@ test_yazi_turns_off_icons_and_powerline_separators_without_glyphs() {
   done
   check "grep -Eq '^sep_left *= *\{ open = \"\", close = \"\" \}' '$T/out'" "glyphs off: status bar has no powerline separator"
   check "grep -q '^\[tabs\]' '$T/out' && grep -q '^sep_inner' '$T/out'" "glyphs off: tab separators replaced"
+  # Every other key in yazi's preset theme whose default is a Nerd Font glyph.
+  local key
+  for key in padding separator icon_info icon_warn icon_error icon_file icon_folder icon_command; do
+    check "grep -Eq '^$key *=' '$T/out'" "glyphs off: yazi's glyph default '$key' overridden"
+  done
   check "grep -q 'catppuccin-mocha' '$T/out'" "glyphs off: still themed"
   wizard 'GLYPHS=on; yazi_theme'
   check "! grep -q '^\[icon\]' '$T/out'" "glyphs on: yazi keeps its icons"
@@ -98,8 +103,16 @@ test_neovim_icons_fall_back_to_ascii_without_glyphs() {
   wizard 'GLYPHS=off; nvim_icons_plugin'
   check "grep -q 'nvim-mini/mini.icons' '$T/out'" "configures LazyVim's icon provider"
   check "grep -q 'style = \"ascii\"' '$T/out'" "glyphs off: Neovim uses ASCII icons"
+  check "grep -q 'Error = \"E \"' '$T/out'" "glyphs off: LazyVim diagnostics use letters"
+  check "grep -q 'section_separators = \"\"' '$T/out'" "glyphs off: lualine drops powerline separators"
+  check "! has_nerd_glyph '$T/out'" "glyphs off: nothing in the Neovim file is a glyph"
+  if command -v nvim >/dev/null 2>&1; then
+    cp "$T/out" "$T/icons.lua"
+    check "nvim -l '$T/icons.lua' >/dev/null 2>&1" "glyphs off: the Neovim file is valid Lua"
+  fi
   wizard 'GLYPHS=on; nvim_icons_plugin'
   check "grep -q 'style = \"glyph\"' '$T/out'" "glyphs on: Neovim uses Nerd Font icons"
+  check "! grep -q 'LazyVim/LazyVim' '$T/out'" "glyphs on: LazyVim keeps its own icons"
   cleanup
 }
 
@@ -134,20 +147,22 @@ test_ghostty_stage_follows_the_saved_choice() {
 
 test_choosing_plain_text_saves_it_and_skips_the_font() {
   new_home
-  local saved_path="$PATH"
-  fake_brew
-  printf '\n2\n\n\n' > "$T/answers"
-  CLI_INPUT="$T/answers" cli --only 2
-  check "grep -qx 'GLYPHS=off' '$STATE/choices.env'" "answer 2 saves plain text"
-  check "! grep -q 'font-jetbrains-mono-nerd-font' '$T/brew.log' 2>/dev/null" "plain text: no Nerd Font install"
-  printf '\n\n\n' > "$T/answers"
-  CLI_INPUT="$T/answers" cli --only 2
-  check "grep -qx 'GLYPHS=off' '$STATE/choices.env'" "Enter on a re-run keeps the saved answer"
-  printf '\n1\n\n\n' > "$T/answers"
-  CLI_INPUT="$T/answers" cli --only 2
-  check "grep -qx 'GLYPHS=on' '$STATE/choices.env'" "answer 1 saves icons"
-  check "grep -q 'font-jetbrains-mono-nerd-font' '$T/brew.log'" "icons: installs the Nerd Font"
-  PATH="$saved_path"
+  ( # subshell: the fake brew on PATH never outlives this test
+    fake_brew
+    printf '\n2\n\n\n' > "$T/answers"
+    CLI_INPUT="$T/answers" cli --only 2
+    check "grep -qx 'GLYPHS=off' '$STATE/choices.env'" "answer 2 saves plain text"
+    check "! grep -q 'font-jetbrains-mono-nerd-font' '$T/brew.log' 2>/dev/null" "plain text: no Nerd Font install"
+    printf '\n\n\n' > "$T/answers"
+    CLI_INPUT="$T/answers" cli --only 2
+    check "grep -qx 'GLYPHS=off' '$STATE/choices.env'" "Enter on a re-run keeps the saved answer"
+    printf '\n1\n\n\n' > "$T/answers"
+    CLI_INPUT="$T/answers" cli --only 2
+    check "grep -qx 'GLYPHS=on' '$STATE/choices.env'" "answer 1 saves icons"
+    check "grep -q 'font-jetbrains-mono-nerd-font' '$T/brew.log'" "icons: installs the Nerd Font"
+    printf '%s %s\n' "$PASSES" "$FAILS" > "$T/tally"
+  )
+  read -r PASSES FAILS < "$T/tally"
   cleanup
 }
 
