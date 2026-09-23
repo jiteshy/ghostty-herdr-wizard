@@ -114,6 +114,31 @@ test_second_run_keeps_the_users_original_in_backup() {
   cleanup
 }
 
+test_edits_made_between_runs_are_kept_when_replaced() {
+  new_home
+  mkdir -p "$H/.config/ghostty"
+  printf 'theme = mine\n' > "$H/.config/ghostty/config"
+  cp "$H/.config/ghostty/config" "$T/original"
+  wizard 'journal_init; JOURNALING=1; printf "run one\n" | install_file "$HOME/.config/ghostty/config"'
+  printf 'run one\nfont-size = 18\n' > "$H/.config/ghostty/config"
+  cp "$H/.config/ghostty/config" "$T/edited"
+  wizard 'journal_init; JOURNALING=1; printf "run two\n" | install_file "$HOME/.config/ghostty/config"'
+  same_bytes "$STATE/backups/.config/ghostty/config" "$T/original" "store still holds the first-ever original"
+  local kept; kept=$(find "$STATE/replaced" -type f -path '*/.config/ghostty/config' 2>/dev/null | head -1)
+  same_bytes "$kept" "$T/edited" "the user's between-runs edits are kept under replaced/"
+  cleanup
+}
+
+test_unedited_wizard_output_is_not_kept_again() {
+  new_home
+  mkdir -p "$H/.config/ghostty"
+  printf 'theme = mine\n' > "$H/.config/ghostty/config"
+  wizard 'journal_init; JOURNALING=1; printf "run one\n" | install_file "$HOME/.config/ghostty/config"'
+  wizard 'journal_init; JOURNALING=1; printf "run two\n" | install_file "$HOME/.config/ghostty/config"'
+  check "[[ ! -e '$STATE/replaced' ]]" "wizard's own unedited output is not kept as a replaced version"
+  cleanup
+}
+
 test_file_the_wizard_created_is_never_backed_up_as_an_original() {
   new_home
   wizard 'journal_init; JOURNALING=1

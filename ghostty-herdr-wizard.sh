@@ -192,6 +192,9 @@ SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 STATE_DIR="$HOME/.ghostty-herdr-wizard"
 JOURNAL="$STATE_DIR/journal.tsv"
 BACKUP_DIR="$STATE_DIR/backups"
+# Where this run keeps a file it is about to replace when the store already has
+# the original but the file has since changed (e.g. the user edited it).
+REPLACED_DIR="$STATE_DIR/replaced/$(date +%Y%m%d-%H%M%S)"
 # 1 while a stage that records its changes is running (see JOURNALED_STAGES).
 JOURNALING=0
 
@@ -315,18 +318,32 @@ journal_write() {
 
 # backup PATH: copy a file or directory into the backup store, but only the
 # first time the wizard ever touches it. Later runs, and files the wizard
-# created itself, are never captured, so the store always holds what the user
-# had before the wizard.
+# created itself, are never captured there, so the store always holds what the
+# user had before the wizard. When the store already has PATH but PATH is not
+# byte-for-byte what the wizard last wrote (the user edited it since, or the
+# stage doesn't journal), the current version goes to $REPLACED_DIR instead, so
+# replacing it never loses anything.
 backup() {
   [[ -e "$1" ]] || return 0
-  local ref
+  local ref prior=""
   ref=$(backup_ref "$1")
-  [[ -e "$BACKUP_DIR/$ref" ]] && return 0
-  journal_entry "$1" >/dev/null && return 0
-  mkdir -p "$(dirname "$BACKUP_DIR/$ref")"
-  cp -Rp "$1" "$BACKUP_DIR/$ref"
+  prior=$(journal_entry "$1") || prior=""
+  if [[ ! -e "$BACKUP_DIR/$ref" && -z "$prior" ]]; then
+    mkdir -p "$(dirname "$BACKUP_DIR/$ref")"
+    cp -Rp "$1" "$BACKUP_DIR/$ref"
+    BACKED_UP+=("$1")
+    note "backed up $1 → $BACKUP_DIR/$ref"
+    return 0
+  fi
+  # Exactly what the wizard wrote last time: nothing of the user's to keep.
+  if [[ -n "$prior" && -f "$1" && "${prior##*$'\t'}" == "$(sha256 "$1")" ]]; then
+    return 0
+  fi
+  [[ -e "$REPLACED_DIR/$ref" ]] && return 0
+  mkdir -p "$(dirname "$REPLACED_DIR/$ref")"
+  cp -Rp "$1" "$REPLACED_DIR/$ref"
   BACKED_UP+=("$1")
-  note "backed up $1 → $BACKUP_DIR/$ref"
+  note "kept the current $1 → $REPLACED_DIR/$ref"
 }
 
 # restore_backup PATH REF STAMP: put the backup at REF back at PATH. The copy is
@@ -1077,8 +1094,14 @@ stage_neovim() {
     if [[ -e "$nvim_dir" ]]; then
       warn "$nvim_dir exists but isn't LazyVim."
       if confirm "Move it to the backup folder and install LazyVim?"; then
-        mkdir -p "$BACKUP_DIR"
-        run mv "$nvim_dir" "$BACKUP_DIR/nvim"
+        # First-ever original goes in the store; if the store already has one,
+        # this run's replaced folder keeps it, so nothing is nested or lost.
+        local nvim_aside
+        nvim_aside="$BACKUP_DIR/$(backup_ref "$nvim_dir")"
+        [[ -e "$nvim_aside" ]] && nvim_aside="$REPLACED_DIR/$(backup_ref "$nvim_dir")"
+        mkdir -p "$(dirname "$nvim_aside")"
+        run mv "$nvim_dir" "$nvim_aside"
+        [[ -e "$nvim_dir" ]] || BACKED_UP+=("$nvim_dir")
       fi
     fi
     if [[ ! -e "$nvim_dir" ]]; then
@@ -2103,5 +2126,6 @@ if (( ${#CHANGED[@]} )); then
 fi
 if (( ${#BACKED_UP[@]} )); then
   note "backups of what was there before: $BACKUP_DIR"
+  [[ -d "$REPLACED_DIR" ]] && note "versions this run replaced, kept too: $REPLACED_DIR"
 fi
 printf '\n  Run %skeys%s for the cheat sheet. Replay the tour: bash %s --tour\n\n' "$BOLD" "$RESET" "$SCRIPT_PATH"
