@@ -58,7 +58,7 @@ The script does three types of work:
 2. It writes config files. If a file exists and is different, the script shows you the changes and asks you first. It keeps a copy of the old file in `~/.ghostty-herdr-wizard-backups/`.
 3. It tells you what to do for the steps that need a person. Examples: approve a macOS permission, or sign in to GitHub.
 
-**Steps 1 to 5: the terminal.** Install Ghostty and the JetBrains Mono Nerd Font. Write the Ghostty config: the Catppuccin Mocha dark theme, and Cmd keys that control herdr. Make the Ctrl-Space key free for herdr.
+**Steps 1 to 5: the terminal.** Install Ghostty. Choose icons (installs the JetBrains Mono Nerd Font) or plain text, which works in any font, so nothing shows as boxes in a terminal without a Nerd Font. Write the Ghostty config: the Catppuccin Mocha dark theme, and Cmd keys that control herdr. Make the Ctrl-Space key free for herdr.
 
 **Steps 6 to 8: the shell.** Install command-line tools: `bat`, `eza`, `fd`, `ripgrep`, `fzf`, `zoxide`, `glow`, `jless`, `btop` and `tldr`. Set up the Starship prompt. Add history search, aliases, and a command that finds and opens your repos.
 
