@@ -195,7 +195,8 @@ BACKUP_DIR="$STATE_DIR/backups"
 # Where this run keeps a file it is about to replace when the store already has
 # the original but the file has since changed (e.g. the user edited it).
 REPLACED_DIR="$STATE_DIR/replaced/$(date +%Y%m%d-%H%M%S)"
-# 1 while a stage that records its changes is running (see JOURNALED_STAGES).
+# 1 while the stages run, so the helpers record what they change. Off when the
+# library is only sourced (the tests turn it on themselves).
 JOURNALING=0
 
 # Homebrew lives in /opt/homebrew on Apple silicon and /usr/local on Intel. Put it
@@ -214,6 +215,8 @@ STATUSLINE="$HOME/.claude/statusline.sh"
 HERDR_PLUGIN_DIR="$HOME/.herdr/plugins/worktree-tabs"
 CHANGED=()   # files this run created or modified
 BACKED_UP=() # paths this run copied into the backup store
+KEPT=()      # changes --revert left alone because the user edited them since
+WROTE=0      # set by install_file: 1 if its last call wrote the file
 
 # Tabs opened on every new workspace and worktree. Empty disables the plugin.
 DEFAULT_TABS="agents,code,dev server,git review"
@@ -273,9 +276,18 @@ brew_formulae() {
 
 # ── Journal and backup store ──────────────────────────────────────────────
 # journal.tsv, one tab-separated line per change, oldest first:
-#   <time>  MODIFY  <path>  <backup ref>  <sha256 of what the wizard wrote>
-#   <time>  CREATE  <path>  <sha256 of what the wizard wrote>
+#   <time>  MODIFY   <path>  <backup ref>  <sha256 written, or "dir">
+#   <time>  CREATE   <path>  <sha256 written, or "dir">
+#   <time>  BLOCK    <path>  <comment leader>  <new|existing>  <sha256 written>
+#   <time>  JSONKEY  <path>  <key>  <prior|<absent>>  <written|<absent>>
+#   <time>  GITKEY   <path>  <key>  <prior|<absent>>  <written>
+#   <time>  MANUAL   <what to undo in System Settings>  <settings deep link>
+#   <time>  UNDO     <undo_ function --revert calls at the end>
 # A backup ref is relative to $BACKUP_DIR. Lines are only ever appended.
+#
+# --revert undoes them newest first. It never deletes: whatever it takes away
+# is moved under reverted/<time>/ (and --revert --restore moves it back). A
+# file changed since the wizard wrote it is only reverted if the user says so.
 
 journal_init() { mkdir -p "$BACKUP_DIR" && touch "$JOURNAL"; }
 
@@ -298,10 +310,13 @@ journal_entry() {
 # true when a file was there before this write. A path keeps the type of its
 # first entry: the wizard's own creation stays a CREATE however often it is
 # rewritten, and a MODIFY keeps pointing at the user's original.
+#
+# A directory is hashed as "dir": it is undone as one unit, never drift-checked
+# (moving it keeps everything in it), and it covers the entries inside it.
 journal_write() {
   [[ "$JOURNALING" == 1 ]] || return 0
-  local path="$1" existed="$2" prior type ref hash
-  hash=$(sha256 "$path")
+  local path="$1" existed="$2" prior type ref hash=dir
+  [[ -f "$path" ]] && hash=$(sha256 "$path")
   journal_init
   if prior=$(journal_entry "$path"); then
     type=$(printf '%s' "$prior" | cut -f2)
@@ -316,6 +331,41 @@ journal_write() {
   printf '%s\t%s\t%s\t%s%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$type" "$path" "$ref" "$hash" >> "$JOURNAL"
 }
 
+# journal_manual DESCRIPTION LINK: record a change only System Settings can
+# undo, as the step that undoes it and the settings pane where it's done.
+# --revert prints these as a checklist; it never touches such settings itself.
+journal_manual() {
+  [[ "$JOURNALING" == 1 ]] || return 0
+  journal_init
+  awk -F'\t' -v d="$1" '$2 == "MANUAL" && $3 == d { found = 1 } END { exit !found }' "$JOURNAL" && return 0
+  printf '%s\tMANUAL\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$1" "$2" >> "$JOURNAL"
+}
+
+# journal_undo FUNCTION: a stage with an effect no file entry expresses (herdr
+# reloading its config) names the undo_<stage> function --revert calls once
+# every file is back.
+journal_undo() {
+  [[ "$JOURNALING" == 1 ]] || return 0
+  journal_init
+  awk -F'\t' -v f="$1" '$2 == "UNDO" && $3 == f { found = 1 } END { exit !found }' "$JOURNAL" && return 0
+  printf '%s\tUNDO\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$1" >> "$JOURNAL"
+}
+
+# journaled_dirs: directories the journal records as created or replaced whole.
+journaled_dirs() {
+  [[ -f "$JOURNAL" ]] || return 0
+  awk -F'\t' '($2 == "CREATE" || $2 == "MODIFY") && $NF == "dir" { print $3 }' "$JOURNAL"
+}
+
+# in_journaled_dir PATH: true when PATH lies inside one of journaled_dirs.
+in_journaled_dir() {
+  local dir
+  while IFS= read -r dir; do
+    [[ -n "$dir" && "$1" == "$dir"/* ]] && return 0
+  done < <(journaled_dirs)
+  return 1
+}
+
 # backup PATH: copy a file or directory into the backup store, but only the
 # first time the wizard ever touches it. Later runs, and files the wizard
 # created itself, are never captured there, so the store always holds what the
@@ -325,6 +375,9 @@ journal_write() {
 # replacing it never loses anything.
 backup() {
   [[ -e "$1" ]] || return 0
+  # Inside a directory the wizard replaced whole: that directory is undone as
+  # one unit, and a copy here would land inside the user's backed-up original.
+  in_journaled_dir "$1" && return 0
   local ref prior=""
   ref=$(backup_ref "$1")
   prior=$(journal_entry "$1") || prior=""
@@ -339,6 +392,9 @@ backup() {
   if [[ -n "$prior" && -f "$1" && "${prior##*$'\t'}" == "$(sha256 "$1")" ]]; then
     return 0
   fi
+  # Undone key by key, so the user's edits are never at risk: the first-ever
+  # copy above is the whole safety net.
+  case "$(printf '%s' "$prior" | cut -f2)" in JSONKEY | GITKEY) return 0 ;; esac
   [[ -e "$REPLACED_DIR/$ref" ]] && return 0
   mkdir -p "$(dirname "$REPLACED_DIR/$ref")"
   cp -Rp "$1" "$REPLACED_DIR/$ref"
@@ -346,20 +402,76 @@ backup() {
   note "kept the current $1 → $REPLACED_DIR/$ref"
 }
 
+# relocate PATH STAMP [LIST]: move PATH under reverted/STAMP/, keeping its path
+# relative to $HOME, and list it there in LIST (default "manifest", the list
+# --revert --restore puts back). The undo path never deletes anything; this is
+# how it removes.
+relocate() {
+  local path="$1" stamp="$2" list="${3:-manifest}" dir aside
+  dir="$STATE_DIR/reverted/$stamp"
+  aside="$dir/$(backup_ref "$path")"
+  mkdir -p "$(dirname "$aside")" || return 1
+  mv "$path" "$aside" || return 1
+  printf '%s\n' "$path" >> "$dir/$list"
+}
+
+# revert_drift_ok PATH SHA AFTER: whether to go ahead and revert PATH. SHA is
+# what the wizard last wrote there. If PATH still matches it nobody touched it,
+# so yes, silently. Otherwise the user edited it since: show the diff between
+# PATH and AFTER (what reverting leaves there) and ask, defaulting to keeping
+# their version, which is then listed in the closing summary.
+revert_drift_ok() {
+  local path="$1" want="$2" after="$3" have=""
+  [[ "$want" == dir ]] && return 0
+  [[ -f "$path" ]] && have=$(sha256 "$path")
+  [[ "$have" == "$want" ]] && return 0
+  printf '\n'
+  warn "$path has changed since the wizard wrote it. Reverting would do this:"
+  diff -u "$( [[ -f "$path" ]] && printf '%s' "$path" || printf /dev/null)" "$after" 2>/dev/null |
+    head -40 | sed 's/^/    /' || true
+  if confirm "Revert it anyway? (No keeps your version)"; then
+    return 0
+  fi
+  KEPT+=("$path")
+  return 1
+}
+
+# replace_dir DIR CMD...: give DIR a fresh start. An existing DIR is moved into
+# the backup store (or this run's replaced folder, if the store already has
+# the first-ever one), then CMD creates the new DIR, which is journaled as one
+# unit so --revert moves the whole tree aside and puts the original back.
+replace_dir() {
+  local dir="$1" existed=false ref aside
+  shift
+  if [[ -e "$dir" ]]; then
+    ref=$(backup_ref "$dir")
+    aside="$BACKUP_DIR/$ref"
+    [[ -e "$aside" ]] && aside="$REPLACED_DIR/$ref"
+    mkdir -p "$(dirname "$aside")"
+    mv "$dir" "$aside" || return 1
+    existed=true
+    BACKED_UP+=("$dir")
+    note "moved $dir → $aside"
+  fi
+  "$@" || true
+  # Journaled even if CMD failed, so the original can still be brought back.
+  if [[ -e "$dir" ]] || $existed; then
+    journal_write "$dir" "$existed"
+    CHANGED+=("$dir")
+  fi
+  [[ -e "$dir" ]]
+}
+
 # restore_backup PATH REF STAMP: put the backup at REF back at PATH. The copy is
 # staged next to PATH first, so a failed copy leaves PATH untouched; whatever
-# was at PATH is moved under reverted/STAMP/, never deleted.
+# was at PATH is relocated, never deleted.
 restore_backup() {
-  local path="$1" ref="$2" stamp="$3" staged aside
+  local path="$1" ref="$2" stamp="$3" staged
   [[ -e "$BACKUP_DIR/$ref" ]] || return 1
   staged="$path.ghostty-herdr-wizard-restore"
   mkdir -p "$(dirname "$path")"
   cp -Rp "$BACKUP_DIR/$ref" "$staged" || return 1
-  if [[ -e "$path" ]]; then
-    aside="$STATE_DIR/reverted/$stamp/$(backup_ref "$path")"
-    mkdir -p "$(dirname "$aside")"
-    mv "$path" "$aside"
-  fi
+  if [[ -e "$path" ]]; then relocate "$path" "$stamp" || return 1; fi
   mv "$staged" "$path"
 }
 
@@ -372,48 +484,237 @@ revert_all() {
     say "Nothing to revert: the wizard has no record of changing anything on this machine."
     return 0
   fi
-  local stamp seen=$'\n' refs=() restored=0 failed=0 type path ref archive ref_used
-  stamp=$(date +%Y%m%d-%H%M%S)
-  while IFS=$'\t' read -r _ type path ref _; do
-    case "$seen" in *$'\n'"$path"$'\n'*) continue ;; esac
-    seen="$seen$path"$'\n'
+  local stamp seen=$'\n' refs=() manual=() hooks=() failed=0 type path f4 f5 f6 key archive ref_used
+  stamp=$(revert_stamp)
+  while IFS=$'\t' read -r -u 3 _ type path f4 f5 f6; do
+    # Moving a directory the wizard created or replaced whole takes every
+    # change inside it along, so those entries aren't undone one by one.
+    in_journaled_dir "$path" && continue
+    # Newest entry wins: one undo per path (per key, for key-level entries).
+    key="$type $path $f4"
+    case "$type" in MODIFY | CREATE | BLOCK) key="file $path" ;; esac
+    case "$seen" in *$'\n'"$key"$'\n'*) continue ;; esac
+    seen="$seen$key"$'\n'
+    [[ -e "$BACKUP_DIR/$(backup_ref "$path")" ]] && refs+=("$(backup_ref "$path")")
     case "$type" in
-      MODIFY)
-        if restore_backup "$path" "$ref" "$stamp"; then
-          ok "restored $path"
-          refs+=("$ref")
-          restored=$((restored + 1))
-        else
-          warn "couldn't restore $path from $BACKUP_DIR/$ref, left as is"
-          SKIPPED+=("restore $path from $BACKUP_DIR/$ref")
-          failed=$((failed + 1))
-        fi
-        ;;
-      CREATE) note "left in place, created by the wizard: $path" ;;
+      MODIFY) revert_modify "$path" "$f4" "$f5" "$stamp" ;;
+      CREATE) revert_create "$path" "$f4" "$stamp" ;;
+      BLOCK) revert_block "$path" "$f4" "$f5" "$stamp" ;;
+      JSONKEY) revert_json_key "$path" "$f4" "$f5" "$f6" "$stamp" ;;
+      GITKEY) revert_git_key "$f4" "$f5" "$f6" ;;
+      MANUAL) manual=("$path"$'\t'"$f4" ${manual[@]+"${manual[@]}"}) ;;
+      UNDO) hooks+=("$path") ;;
       *) warn "unrecognised journal entry '$type' for $path, skipped" ;;
-    esac
-  done < <(awk '{ line[NR] = $0 } END { for (i = NR; i > 0; i--) print line[i] }' "$JOURNAL")
+    esac || failed=$((failed + 1))
+  done 3< <(awk '{ line[NR] = $0 } END { for (i = NR; i > 0; i--) print line[i] }' "$JOURNAL")
+  # Only names this script declares as undo_ functions: the journal is data.
+  for key in ${hooks[@]+"${hooks[@]}"}; do
+    if [[ "$key" =~ ^undo_[a-z_]+$ ]] && declare -F "$key" >/dev/null; then
+      "$key" || failed=$((failed + 1))
+    else
+      warn "unknown undo step '$key' in the journal, skipped"
+    fi
+  done
   printf '\n'
-  ok "restored $restored file(s)"
-  [[ -d "$STATE_DIR/reverted/$stamp" ]] && note "the wizard's versions were moved to $STATE_DIR/reverted/$stamp"
+  [[ -d "$STATE_DIR/reverted/$stamp" ]] && note "what the wizard left was moved to $STATE_DIR/reverted/$stamp"
+  if (( ${#KEPT[@]} )); then
+    printf '\n'; warn "kept your version of these, since you changed them after the wizard did:"
+    for path in "${KEPT[@]}"; do note "  - $path"; done
+  fi
+  revert_checklist ${manual[@]+"${manual[@]}"}
   if (( failed )); then
-    warn "$failed file(s) could not be restored; the journal is kept, so fix that and run --revert again"
+    warn "$failed change(s) could not be undone; the journal is kept, so fix that and run --revert again"
     return 0
   fi
   archive="$STATE_DIR/archive/$stamp"
   mkdir -p "$archive"
   mv "$JOURNAL" "$archive/journal.tsv"
   for ref_used in ${refs[@]+"${refs[@]}"}; do
+    [[ -e "$BACKUP_DIR/$ref_used" ]] || continue
     mkdir -p "$(dirname "$archive/backups/$ref_used")"
     mv "$BACKUP_DIR/$ref_used" "$archive/backups/$ref_used"
   done
   note "journal and the backups it used archived to $archive"
 }
 
+# revert_stamp: a name for this revert's folders, unique even within a second.
+revert_stamp() {
+  local stamp n=1
+  stamp=$(date +%Y%m%d-%H%M%S)
+  while [[ -e "$STATE_DIR/reverted/$stamp" || -e "$STATE_DIR/archive/$stamp" ]]; do
+    n=$((n + 1))
+    stamp="$(date +%Y%m%d-%H%M%S)-$n"
+  done
+  printf '%s' "$stamp"
+}
+
+# revert_restore: --revert --restore. Move everything the most recent revert
+# relocated back to where it was, last moved first. Whatever is at such a path
+# now is relocated first, listed as "in-the-way" so a second --restore doesn't
+# swap it straight back; it stays under reverted/ like everything else.
+revert_restore() {
+  local dir="" candidate stamp path lines=() i
+  for candidate in "$STATE_DIR"/reverted/*/manifest; do
+    [[ -f "$candidate" ]] && dir="${candidate%/manifest}"
+  done
+  if [[ -z "$dir" ]]; then
+    say "Nothing to restore: no revert has moved anything aside."
+    return 0
+  fi
+  stamp=$(revert_stamp)
+  while IFS= read -r path; do lines+=("$path"); done < "$dir/manifest"
+  for (( i = ${#lines[@]} - 1; i >= 0; i-- )); do
+    path="${lines[$i]}"
+    if [[ ! -e "$dir/$(backup_ref "$path")" ]]; then
+      warn "nothing kept for $path under $dir, skipped"
+      continue
+    fi
+    if [[ -e "$path" ]]; then relocate "$path" "$stamp" in-the-way || { warn "couldn't move $path aside, skipped"; continue; }; fi
+    mkdir -p "$(dirname "$path")"
+    mv "$dir/$(backup_ref "$path")" "$path" && ok "put back $path"
+  done
+  mv "$dir/manifest" "$dir/manifest.restored"
+  [[ -d "$STATE_DIR/reverted/$stamp" ]] && note "what was in the way was moved to $STATE_DIR/reverted/$stamp"
+  return 0
+}
+
+# revert_checklist "DESCRIPTION<tab>LINK"...: the System Settings changes the
+# user has to undo by hand, numbered, each offering to open its settings pane.
+revert_checklist() {
+  (( $# )) || return 0
+  local i=0 item
+  printf '\n'
+  say "${BOLD}Left for you in System Settings${RESET} (the wizard never changes these itself):"
+  for item in "$@"; do
+    i=$((i + 1))
+    say "$i. ${item%%$'\t'*}"
+  done
+  i=0
+  for item in "$@"; do
+    i=$((i + 1))
+    confirm "Open the settings for $i now?" && open_url "${item#*$'\t'}"
+  done
+  return 0
+}
+
+# revert_modify PATH REF SHA STAMP: put the user's original back.
+revert_modify() {
+  local path="$1" ref="$2" hash="$3" stamp="$4"
+  revert_drift_ok "$path" "$hash" "$BACKUP_DIR/$ref" || return 0
+  if restore_backup "$path" "$ref" "$stamp"; then
+    ok "restored $path"
+    return 0
+  fi
+  warn "couldn't restore $path from $BACKUP_DIR/$ref, left as is"
+  SKIPPED+=("restore $path from $BACKUP_DIR/$ref")
+  return 1
+}
+
+# revert_create PATH SHA STAMP: move what the wizard created out of the way.
+revert_create() {
+  local path="$1" hash="$2" stamp="$3"
+  if [[ ! -e "$path" ]]; then
+    note "already gone: $path"
+    return 0
+  fi
+  revert_drift_ok "$path" "$hash" /dev/null || return 0
+  if relocate "$path" "$stamp"; then
+    ok "moved $path (the wizard created it)"
+    return 0
+  fi
+  warn "couldn't move $path aside, left as is"
+  SKIPPED+=("move $path out of the way")
+  return 1
+}
+
+# revert_json_key PATH KEY PRIOR WRITTEN STAMP: put one key back as it was, or
+# delete it if it wasn't there. Nothing else in the file is touched. KEY []
+# marks a file the wizard created: it is moved away once nothing else is in it.
+revert_json_key() {
+  local path="$1" key="$2" prior="$3" written="$4" stamp="$5" label current staged
+  [[ -f "$path" ]] || return 0
+  if [[ "$key" == '[]' ]]; then
+    if jq -e '. == {}' "$path" >/dev/null 2>&1; then
+      relocate "$path" "$stamp" || return 1
+      ok "moved $path (the wizard created it)"
+    else
+      note "left $path in place: it holds other settings now"
+    fi
+    return 0
+  fi
+  label=$(jq -rn --argjson p "$key" '$p | join(".")')
+  if ! current=$(jq -r --argjson p "$key" "$JQ_ENC"'enc(.; $p)' "$path" 2>/dev/null); then
+    warn "$path isn't valid JSON, so $label couldn't be reverted"
+    SKIPPED+=("revert $label in $path by hand")
+    return 1
+  fi
+  [[ "$current" == "$prior" ]] && return 0
+  if [[ "$current" != "$written" ]]; then
+    printf '\n'
+    warn "$label in $path has changed since the wizard set it."
+    note "  now:            $current"
+    note "  reverting sets: $prior"
+    if ! confirm "Revert it anyway? (No keeps your version)"; then
+      KEPT+=("$label in $path")
+      return 0
+    fi
+  fi
+  staged="$path.ghostty-herdr-wizard-restore"
+  jq --argjson p "$key" --arg v "$prior" \
+    'if $v == "<absent>" then delpaths([$p]) else setpath($p; $v | fromjson) end' "$path" > "$staged" &&
+    mv "$staged" "$path" || return 1
+  ok "reverted $label in $path"
+}
+
+# revert_git_key KEY PRIOR WRITTEN: put one global git setting back, or unset it.
+revert_git_key() {
+  local key="$1" prior="$2" written="$3" current='<absent>'
+  git config --global --get "$key" >/dev/null 2>&1 && current=$(git config --global --get "$key")
+  [[ "$current" == "$prior" ]] && return 0
+  if [[ "$current" != "$written" ]]; then
+    printf '\n'
+    warn "git $key has changed since the wizard set it."
+    note "  now:            $current"
+    note "  reverting sets: $prior"
+    if ! confirm "Revert it anyway? (No keeps your version)"; then
+      KEPT+=("git $key")
+      return 0
+    fi
+  fi
+  if [[ "$prior" == '<absent>' ]]; then
+    git config --global --unset-all "$key" || return 1
+  else
+    git config --global "$key" "$prior" || return 1
+  fi
+  ok "reverted git $key"
+}
+
+# revert_block PATH LEADER ORIGIN STAMP: strip the wizard's block from PATH,
+# whatever else changed in the file: the markers delimit it exactly. A file the
+# wizard created just to hold the block, and nothing else, is moved away.
+revert_block() {
+  local path="$1" leader="$2" origin="$3" stamp="$4" staged
+  if [[ ! -f "$path" ]] || ! grep -qxF -e "$(block_marker begin "$leader")" "$path"; then
+    note "the wizard's block is already gone from $path"
+    return 0
+  fi
+  if [[ "$origin" == new ]] && ! strip_block "$path" "$leader" | grep -q '[^[:space:]]'; then
+    relocate "$path" "$stamp" || return 1
+    ok "moved $path (the wizard created it for its block)"
+    return 0
+  fi
+  staged="$path.ghostty-herdr-wizard-restore"
+  strip_block "$path" "$leader" > "$staged" && mv "$staged" "$path" || return 1
+  ok "removed the wizard's block from $path"
+}
+
 # install_file DEST < content: write DEST if it differs. An existing file that
 # differs is shown as a diff and only replaced after confirmation, with a backup.
+#
+# Sets WROTE to 1 when it wrote DEST, 0 when it left DEST alone.
 install_file() {
   local dest="$1" tmp existed=false
+  WROTE=0
   tmp=$(mktemp)
   cat > "$tmp"
   if [[ -f "$dest" ]] && cmp -s "$tmp" "$dest"; then
@@ -437,37 +738,187 @@ install_file() {
   mkdir -p "$(dirname "$dest")"
   mv "$tmp" "$dest"
   journal_write "$dest" "$existed"
+  WROTE=1
   CHANGED+=("$dest")
   ok "wrote $dest"
+}
+
+# track_file FILE CMD...: run CMD, a tool that may rewrite FILE itself (herdr's
+# agent integrations do), and journal FILE like install_file would if it changed.
+track_file() {
+  local file="$1" existed=false before="" status=0
+  shift
+  if [[ -f "$file" ]]; then
+    existed=true
+    before=$(sha256 "$file")
+    backup "$file"
+  fi
+  "$@" || status=$?
+  if [[ -f "$file" && "$(sha256 "$file")" != "$before" ]]; then
+    journal_write "$file" "$existed"
+    CHANGED+=("$file")
+  fi
+  return "$status"
 }
 
 # upsert_block FILE [COMMENT] < content: replace (or append) the wizard-managed
 # block in a config file, leaving everything outside the markers untouched.
 # COMMENT is the file's comment leader: "#" (default) or "--" for Lua.
+#
+# Journaled as a BLOCK, not as a whole-file change: --revert strips just the
+# markers' region, so everything the user keeps around it survives.
 upsert_block() {
-  local file="$1" leader="${2:-#}" body tmp begin end
-  begin="$leader >>> ghostty-herdr-wizard >>>"
-  end="$leader <<< ghostty-herdr-wizard <<<"
+  local file="$1" leader="${2:-#}" body tmp origin=existing journaling="$JOURNALING"
   body=$(cat)
   tmp=$(mktemp)
-  touch "$file"
+  mkdir -p "$(dirname "$file")"
+  [[ -e "$file" ]] || origin=new
   {
-    awk -v b="$begin" -v e="$end" '$0==b{skip=1;next} $0==e{skip=0;next} !skip' "$file"
-    printf '%s\n%s\n%s\n' "$begin" "$body" "$end"
+    [[ "$origin" == new ]] || strip_block "$file" "$leader"
+    printf '%s\n%s\n%s\n' "$(block_marker begin "$leader")" "$body" "$(block_marker end "$leader")"
   } > "$tmp"
+  JOURNALING=0
   install_file "$file" < "$tmp"
+  JOURNALING="$journaling"
   rm -f "$tmp"
+  (( WROTE )) && journal_block "$file" "$leader" "$origin"
+  return 0
+}
+
+# block_marker begin|end LEADER: the line that opens or closes the wizard's block.
+block_marker() {
+  if [[ "$1" == begin ]]; then
+    printf '%s >>> ghostty-herdr-wizard >>>' "$2"
+  else
+    printf '%s <<< ghostty-herdr-wizard <<<' "$2"
+  fi
+}
+
+# strip_block FILE LEADER: FILE's content without the wizard's block.
+strip_block() {
+  awk -v b="$(block_marker begin "$2")" -v e="$(block_marker end "$2")" \
+    '$0==b{skip=1;next} $0==e{skip=0;next} !skip' "$1"
+}
+
+# journal_block FILE LEADER ORIGIN: record the block just written. ORIGIN is
+# "new" when the wizard created FILE to hold it; the first entry's wins.
+journal_block() {
+  [[ "$JOURNALING" == 1 ]] || return 0
+  local prior
+  journal_init
+  if prior=$(journal_entry "$1") && [[ "$(printf '%s' "$prior" | cut -f2)" == BLOCK ]]; then
+    set -- "$1" "$2" "$(printf '%s' "$prior" | cut -f5)"
+  fi
+  printf '%s\tBLOCK\t%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$1" "$2" "$3" "$(sha256 "$1")" >> "$JOURNAL"
+}
+
+# ── Key-level JSON changes ────────────────────────────────────────────────
+# ~/.claude/settings.json is shared with Claude Code, which writes to it as the
+# user accepts permissions. So the wizard journals the exact keys it changed,
+# each with its value from before the wizard first touched it:
+#   <time>  JSONKEY  <path>  <key as a JSON path array>  <prior|<absent>>  <written|<absent>>
+# and --revert undoes those keys alone. The file is still backed up once, as a
+# safety net, but never restored whole. A key of [] with prior <absent> means
+# the wizard created the file itself.
+
+# enc(DOC; KEY): the value at KEY as compact JSON, or <absent>.
+# shellcheck disable=SC2016
+JQ_ENC='def enc($o; $p): if ($o | getpath($p[:-1]) | type) == "object" and ($o | getpath($p[:-1]) | has($p[-1]))
+  then $o | getpath($p) | tojson else "<absent>" end;'
+
+# json_track FILE CMD...: run CMD, which may change the JSON file FILE, and
+# journal every key it changed (two levels deep, e.g. hooks.Stop).
+json_track() {
+  local file="$1" before after existed=true status=0
+  shift
+  [[ -f "$file" ]] || existed=false
+  before='{}'
+  if $existed && ! before=$(jq -c . "$file" 2>/dev/null); then
+    warn "$file isn't valid JSON, so the wizard won't change it"
+    SKIPPED+=("fix the JSON in $file, then re-run this stage")
+    return 1
+  fi
+  backup "$file"
+  "$@" || status=$?
+  after='{}'
+  [[ -f "$file" ]] && after=$(jq -c . "$file" 2>/dev/null || printf '{}')
+  if [[ "$before" != "$after" ]]; then
+    CHANGED+=("$file")
+    $existed || journal_json_key "$file" '[]' '<absent>' '<exists>'
+    local key prior written
+    while IFS=$'\t' read -r key prior written; do
+      journal_json_key "$file" "$key" "$prior" "$written"
+    done < <(json_changes "$before" "$after")
+  fi
+  return "$status"
+}
+
+# json_set FILE FILTER [JQ ARGS...]: rewrite FILE through a jq filter, creating
+# it as {} first if needed, and journal the keys that changed.
+json_set() {
+  local file="$1"
+  shift
+  json_track "$file" _json_apply "$file" "$@"
+}
+_json_apply() {
+  local file="$1" tmp
+  shift
+  tmp=$(mktemp)
+  mkdir -p "$(dirname "$file")"
+  [[ -f "$file" ]] || printf '{}\n' > "$file"
+  if jq "$@" "$file" > "$tmp"; then
+    mv "$tmp" "$file"
+    ok "updated $file"
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+# json_changes BEFORE AFTER: one line per changed key, "<key> <prior> <written>",
+# values compact JSON or <absent>. Objects are compared one level down, so a
+# tool adding hooks.Stop doesn't claim the user's other hooks.
+json_changes() {
+  jq -rn --argjson a "$1" --argjson b "$2" "$JQ_ENC"'
+    ((($a | keys_unsorted) + ($b | keys_unsorted)) | unique[]) as $k
+    | (if ($a[$k] | type) == "object" and ($b[$k] | type) == "object"
+       then ((($a[$k] | keys_unsorted) + ($b[$k] | keys_unsorted)) | unique[]) as $k2 | [$k, $k2]
+       else [$k] end) as $p
+    | select(enc($a; $p) != enc($b; $p))
+    | [($p | tojson), enc($a; $p), enc($b; $p)] | join("\t")'
+}
+
+# journal_json_key FILE KEY PRIOR WRITTEN: append a JSONKEY entry. A key the
+# journal already knows keeps its first-ever prior value.
+journal_json_key() {
+  [[ "$JOURNALING" == 1 ]] || return 0
+  local first
+  journal_init
+  first=$(awk -F'\t' -v p="$1" -v k="$2" '$2 == "JSONKEY" && $3 == p && $4 == k { print $5; exit }' "$JOURNAL")
+  [[ -n "$first" ]] && set -- "$1" "$2" "$first" "$4"
+  printf '%s\tJSONKEY\t%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$1" "$2" "$3" "$4" >> "$JOURNAL"
 }
 
 # git_set KEY VALUE: set a global git config value if it isn't already.
+# Journaled key by key like the JSON settings, since the user edits their git
+# config too:  <time>  GITKEY  ~/.gitconfig  <key>  <prior|<absent>>  <written>
 git_set() {
-  local current
+  local current prior
   current=$(git config --global --get "$1" || true)
   if [[ "$current" == "$2" ]]; then
     ok "git $1 = $2"
-  else
-    run git config --global "$1" "$2"
+    return 0
   fi
+  prior="$current"
+  git config --global --get "$1" >/dev/null 2>&1 || prior='<absent>'
+  run git config --global "$1" "$2"
+  [[ "$JOURNALING" == 1 ]] || return 0
+  [[ "$(git config --global --get "$1" || true)" == "$2" ]] || return 0
+  journal_init
+  local first
+  first=$(awk -F'\t' -v k="$1" '$2 == "GITKEY" && $4 == k { print $5; exit }' "$JOURNAL")
+  [[ -n "$first" ]] && prior="$first"
+  printf '%s\tGITKEY\t%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$HOME/.gitconfig" "$1" "$prior" "$2" >> "$JOURNAL"
 }
 
 # ctrl_space_taken: true while macOS still claims Ctrl-Space for input sources.
@@ -834,6 +1285,8 @@ stage_free_ctrl_space() {
       SKIPPED+=("confirm Ctrl-Space is free: System Settings → Keyboard → Keyboard Shortcuts → Input Sources")
     else
       ok "Ctrl-Space is free"
+      journal_manual "Turn 'Select the previous input source' (Ctrl-Space) back on: Keyboard → Keyboard Shortcuts → Input Sources" \
+        "x-apple.systempreferences:com.apple.Keyboard-Settings.extension"
     fi
   else
     ok "Ctrl-Space is already free"
@@ -896,6 +1349,8 @@ stage_shell() {
   if [[ -n "$answer" ]]; then projects="${answer/#\~/$HOME}"; fi
   if [[ ! -d "$projects" ]]; then
     if confirm "$projects doesn't exist. Create it?"; then
+      # Deliberately not journaled: it fills with the user's repos, and
+      # --revert must never move those.
       mkdir -p "$projects"
     else
       warn "p and prefix m will find nothing until $projects exists"
@@ -1081,6 +1536,11 @@ stage_github() {
   pause
 }
 
+# clone_lazyvim_starter DIR: the LazyVim starter config, as the user's own (no .git).
+clone_lazyvim_starter() {
+  git clone --depth 1 https://github.com/LazyVim/starter "$1" && rm -rf "$1/.git"
+}
+
 stage_neovim() {
   say "LazyVim with TypeScript, Tailwind, ESLint, Prettier, JSON and Markdown support,"
   say "tuned for working next to agents: auto-reload of changed files and Diffview for review."
@@ -1094,20 +1554,10 @@ stage_neovim() {
     if [[ -e "$nvim_dir" ]]; then
       warn "$nvim_dir exists but isn't LazyVim."
       if confirm "Move it to the backup folder and install LazyVim?"; then
-        # First-ever original goes in the store; if the store already has one,
-        # this run's replaced folder keeps it, so nothing is nested or lost.
-        local nvim_aside
-        nvim_aside="$BACKUP_DIR/$(backup_ref "$nvim_dir")"
-        [[ -e "$nvim_aside" ]] && nvim_aside="$REPLACED_DIR/$(backup_ref "$nvim_dir")"
-        mkdir -p "$(dirname "$nvim_aside")"
-        run mv "$nvim_dir" "$nvim_aside"
-        [[ -e "$nvim_dir" ]] || BACKED_UP+=("$nvim_dir")
+        replace_dir "$nvim_dir" run clone_lazyvim_starter "$nvim_dir" && fresh=true
       fi
-    fi
-    if [[ ! -e "$nvim_dir" ]]; then
-      run git clone --depth 1 https://github.com/LazyVim/starter "$nvim_dir"
-      rm -rf "$nvim_dir/.git"
-      fresh=true
+    else
+      replace_dir "$nvim_dir" run clone_lazyvim_starter "$nvim_dir" && fresh=true
     fi
   fi
   if [[ ! -f "$lazy_lua" ]]; then
@@ -1524,6 +1974,7 @@ resume_agents_on_restore = true
 [worktrees]
 directory = "~/.herdr/worktrees"
 EOF
+  journal_undo undo_herdr
   say "Validating:"
   if herdr config check; then
     ok "herdr config is valid"
@@ -1549,6 +2000,22 @@ EOF
   pause
 }
 
+# undo_herdr: after --revert, make a running herdr server let go of the tab
+# plugin whose files were moved away, and reload the restored config now
+# rather than at its next restart.
+undo_herdr() {
+  command -v herdr >/dev/null 2>&1 || return 0
+  if [[ ! -e "$HERDR_PLUGIN_DIR/herdr-plugin.toml" ]] && herdr plugin list 2>/dev/null | grep -q worktree-tabs; then
+    herdr plugin unlink worktree-tabs >/dev/null 2>&1 && ok "unlinked the worktree-tabs herdr plugin"
+  fi
+  if herdr server reload-config >/dev/null 2>&1; then
+    ok "herdr reloaded its config"
+  else
+    note "herdr isn't running; it picks up the restored config when it next starts"
+  fi
+  return 0
+}
+
 stage_agents() {
   say "For each agent, herdr can install:"
   step "a hook, so herdr can resume the exact conversation after a reboot or server restart"
@@ -1559,9 +2026,7 @@ stage_agents() {
   if herdr_integration_current claude; then
     ok "herdr hook installed and current"
   elif confirm "Install herdr's Claude Code hook? (~/.claude/settings.json is backed up first)"; then
-    backup "$HOME/.claude/settings.json"
-    run herdr integration install claude
-    CHANGED+=("$HOME/.claude/settings.json")
+    json_track "$HOME/.claude/settings.json" run herdr integration install claude || true
   else
     SKIPPED+=("herdr Claude hook: herdr integration install claude")
   fi
@@ -1579,9 +2044,9 @@ stage_agents() {
   elif herdr_integration_current codex; then
     ok "herdr hook installed and current"
   elif confirm "Install herdr's Codex hook? (~/.codex config files are backed up first)"; then
-    backup "$HOME/.codex/config.toml"
-    backup "$HOME/.codex/hooks.json"
-    run herdr integration install codex
+    # One install, tracked around both files it may write.
+    track_file "$HOME/.codex/config.toml" \
+      track_file "$HOME/.codex/hooks.json" run herdr integration install codex
   else
     SKIPPED+=("herdr Codex hook: herdr integration install codex")
   fi
@@ -1619,6 +2084,7 @@ stage_permissions() {
     -activate com.mitchellh.ghostty >/dev/null 2>&1 || warn "terminal-notifier failed to run"
   step "A banner saying 'Notifications are working' should appear top right."
   step "If macOS asks whether terminal-notifier may send notifications, click Allow."
+  local notifications=true
   if ! confirm "Did the banner appear?"; then
     open_url "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
     step "Find terminal-notifier in the list, turn on 'Allow notifications', pick Banners (or"
@@ -1626,8 +2092,13 @@ stage_permissions() {
     pause "Press Enter when done"
     terminal-notifier -title "herdr" -message "Second try" -activate com.mitchellh.ghostty >/dev/null 2>&1 || true
     if ! confirm "Did this second banner appear?"; then
+      notifications=false
       SKIPPED+=("notifications: allow terminal-notifier in System Settings → Notifications")
     fi
+  fi
+  if $notifications; then
+    journal_manual "Turn off notifications for terminal-notifier, if you like: Notifications → terminal-notifier" \
+      "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
   fi
   if [[ -n "${HERDR_ENV:-}" ]]; then
     printf '\n'
@@ -1642,6 +2113,8 @@ stage_permissions() {
   if confirm "Open the Accessibility settings now?"; then
     open_url "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
     step "Turn Ghostty on (use + to add it from /Applications if missing)."
+    journal_manual "Turn off Ghostty's Accessibility access, if you like: Privacy & Security → Accessibility" \
+      "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
   fi
   note "If Ctrl-\` does nothing yet, it starts working after the next Ghostty launch."
   pause "Press Enter when done"
@@ -1679,16 +2152,11 @@ stage_statusline() {
   brew_formulae jq
   install_file "$STATUSLINE" < <(statusline_script)
   chmod +x "$STATUSLINE"
-  local settings="$HOME/.claude/settings.json" tmp
-  [[ -f "$settings" ]] || printf '{}\n' > "$settings"
-  tmp=$(mktemp)
-  if jq --arg cmd "$STATUSLINE" '.statusLine = {type: "command", command: $cmd, padding: 0}' "$settings" > "$tmp"; then
-    install_file "$settings" < "$tmp"
-  else
+  local settings="$HOME/.claude/settings.json"
+  if ! json_set "$settings" --arg cmd "$STATUSLINE" '.statusLine = {type: "command", command: $cmd, padding: 0}'; then
     warn "couldn't update $settings (is it valid JSON?)"
     SKIPPED+=("add statusLine to ~/.claude/settings.json by hand")
   fi
-  rm -f "$tmp"
   note "Running Claude sessions pick it up on their next update; new sessions show it right away."
   pause
 }
@@ -2033,13 +2501,9 @@ STAGES=(
 TOTAL_STAGES=${#STAGES[@]}
 TOUR_START=19
 
-# Stages whose file changes go into the journal, so --revert can undo them.
-# Both of these write the Ghostty config (and its launcher).
-JOURNALED_STAGES=" stage_ghostty_config stage_ghostty_herdr "
-
 usage() {
   cat <<EOF
-usage: bash $(basename "$0") [--from N | --only N,N | --skip N,N | --tour | --list | --revert]
+usage: bash $(basename "$0") [--from N | --only N,N | --skip N,N | --tour | --list | --revert [--restore]]
 
   (no flags)  run every stage; finished stages report "already done" and move on
   --from N    start at stage N (see --list)
@@ -2047,7 +2511,11 @@ usage: bash $(basename "$0") [--from N | --only N,N | --skip N,N | --tour | --li
   --skip N,N  run everything except these stages, e.g. --skip 11,13 (no GitHub, no yazi)
   --tour      only the guided tour (stages $TOUR_START-$TOTAL_STAGES)
   --list      print the stages and exit
-  --revert    put back the Ghostty config the wizard replaced, as it was before
+  --revert    undo every config change the wizard made, back to how it was before
+              (installed tools stay). Nothing is deleted: what it takes away is
+              moved to ~/.ghostty-herdr-wizard/reverted/
+  --revert --restore
+              move what the last --revert took away back into place
 EOF
 }
 
@@ -2091,7 +2559,11 @@ case "${1:-}" in
     ;;
   --revert)
     printf '\n%s%s  Revert%s\n\n' "$BOLD" "$BLUE" "$RESET"
-    revert_all
+    case "${2:-}" in
+      "") revert_all ;;
+      --restore) revert_restore ;;
+      *) usage; exit 2 ;;
+    esac
     if (( ${#SKIPPED[@]} )); then
       printf '\n'; warn "still to do by hand:"
       for s in "${SKIPPED[@]}"; do note "  - $s"; done
@@ -2105,6 +2577,8 @@ esac
 
 journal_init
 banner "Ghostty + herdr terminal for coding agents"
+# Every stage writes through the journaling helpers, so --revert can undo it.
+JOURNALING=1
 for entry in "${STAGES[@]}"; do
   if (( _STAGE_INDEX + 1 < FROM )) ||
     [[ -n "$ONLY" && "$ONLY" != *",$((_STAGE_INDEX + 1)),"* ]] ||
@@ -2113,8 +2587,6 @@ for entry in "${STAGES[@]}"; do
     continue
   fi
   stage "${entry#*:}"
-  JOURNALING=0
-  [[ "$JOURNALED_STAGES" == *" ${entry%%:*} "* ]] && JOURNALING=1
   "${entry%%:*}"
 done
 JOURNALING=0
