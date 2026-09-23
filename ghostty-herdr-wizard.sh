@@ -186,7 +186,14 @@ finish() {
 
 # ── Wizard-specific helpers ───────────────────────────────────────────────
 SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
-BACKUP_DIR="$HOME/.ghostty-herdr-wizard-backups/$(date +%Y%m%d-%H%M%S)"
+# Everything the wizard remembers between runs. The journal is append-only and
+# spans all runs; backups/ holds each path as it was before the wizard ever
+# touched it (first-ever-wins), mirroring its path relative to $HOME.
+STATE_DIR="$HOME/.ghostty-herdr-wizard"
+JOURNAL="$STATE_DIR/journal.tsv"
+BACKUP_DIR="$STATE_DIR/backups"
+# 1 while a stage that records its changes is running (see JOURNALED_STAGES).
+JOURNALING=0
 
 # Homebrew lives in /opt/homebrew on Apple silicon and /usr/local on Intel. Put it
 # on PATH for this run, so a terminal opened before installing brew still works.
@@ -260,22 +267,119 @@ brew_formulae() {
   fi
 }
 
-# backup PATH: copy a file or directory into this run's backup folder. Only the
-# first copy per run is kept, so it always holds the pre-wizard version.
+# ── Journal and backup store ──────────────────────────────────────────────
+# journal.tsv, one tab-separated line per change, oldest first:
+#   <time>  MODIFY  <path>  <backup ref>  <sha256 of what the wizard wrote>
+#   <time>  CREATE  <path>  <sha256 of what the wizard wrote>
+# A backup ref is relative to $BACKUP_DIR. Lines are only ever appended.
+
+journal_init() { mkdir -p "$BACKUP_DIR" && touch "$JOURNAL"; }
+
+sha256() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1"; else sha256sum "$1"; fi | awk '{print $1}'
+}
+
+# backup_ref PATH: where PATH's backup lives, relative to $BACKUP_DIR.
+backup_ref() {
+  if [[ "$1" == "$HOME"/* ]]; then printf '%s' "${1#"$HOME"/}"; else printf '_root%s' "$1"; fi
+}
+
+# journal_entry PATH: PATH's most recent journal line, if it has one.
+journal_entry() {
+  [[ -f "$JOURNAL" ]] || return 1
+  awk -F'\t' -v p="$1" '$3 == p { line = $0 } END { if (line == "") exit 1; print line }' "$JOURNAL"
+}
+
+# journal_write PATH EXISTED: record that the wizard just wrote PATH. EXISTED is
+# true when a file was there before this write. A path keeps the type of its
+# first entry: the wizard's own creation stays a CREATE however often it is
+# rewritten, and a MODIFY keeps pointing at the user's original.
+journal_write() {
+  [[ "$JOURNALING" == 1 ]] || return 0
+  local path="$1" existed="$2" prior type ref hash
+  hash=$(sha256 "$path")
+  journal_init
+  if prior=$(journal_entry "$path"); then
+    type=$(printf '%s' "$prior" | cut -f2)
+  elif [[ "$existed" == true ]]; then
+    type=MODIFY
+  else
+    type=CREATE
+  fi
+  if [[ "$type" == MODIFY ]]; then
+    ref=$(backup_ref "$path")
+    printf '%s\tMODIFY\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$path" "$ref" "$hash" >> "$JOURNAL"
+  else
+    printf '%s\tCREATE\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$path" "$hash" >> "$JOURNAL"
+  fi
+}
+
+# backup PATH: copy a file or directory into the backup store, but only the
+# first time the wizard ever touches it. Later runs, and files the wizard
+# created itself, are never captured, so the store always holds what the user
+# had before the wizard.
 backup() {
   [[ -e "$1" ]] || return 0
-  local name
-  name=$(printf '%s' "${1#"$HOME"/}" | tr '/' '_')
-  [[ -e "$BACKUP_DIR/$name" ]] && return 0
-  mkdir -p "$BACKUP_DIR"
-  cp -R "$1" "$BACKUP_DIR/$name"
-  note "backed up $1 → $BACKUP_DIR/$name"
+  local ref
+  ref=$(backup_ref "$1")
+  [[ -e "$BACKUP_DIR/$ref" ]] && return 0
+  journal_entry "$1" >/dev/null && return 0
+  mkdir -p "$(dirname "$BACKUP_DIR/$ref")"
+  cp -Rp "$1" "$BACKUP_DIR/$ref"
+  note "backed up $1 → $BACKUP_DIR/$ref"
+}
+
+# revert_all: undo every journaled change, newest first, then archive the
+# journal and backups so a later run starts clean. Replaced content is moved
+# under reverted/<stamp>/, never deleted.
+revert_all() {
+  if [[ ! -s "$JOURNAL" ]]; then
+    say "Nothing to revert: the wizard has no record of changing anything on this machine."
+    return 0
+  fi
+  local stamp seen=$'\n' restored=0 ts type path ref aside
+  stamp=$(date +%Y%m%d-%H%M%S)
+  while IFS=$'\t' read -r ts type path ref _; do
+    case "$seen" in *$'\n'"$path"$'\n'*) continue ;; esac
+    seen="$seen$path"$'\n'
+    case "$type" in
+      MODIFY)
+        if [[ ! -e "$BACKUP_DIR/$ref" ]]; then
+          warn "no backup for $path (expected $BACKUP_DIR/$ref), left as is"
+          SKIPPED+=("restore $path by hand")
+          continue
+        fi
+        if [[ -e "$path" ]]; then
+          aside="$STATE_DIR/reverted/$stamp/$(backup_ref "$path")"
+          mkdir -p "$(dirname "$aside")"
+          mv "$path" "$aside"
+        fi
+        mkdir -p "$(dirname "$path")"
+        if cp -Rp "$BACKUP_DIR/$ref" "$path"; then
+          ok "restored $path"
+          restored=$((restored + 1))
+        else
+          warn "couldn't restore $path from $BACKUP_DIR/$ref"
+          SKIPPED+=("restore $path from $BACKUP_DIR/$ref")
+        fi
+        ;;
+      CREATE) note "left in place, created by the wizard: $path" ;;
+      *) warn "unrecognised journal entry '$type' for $path, skipped" ;;
+    esac
+  done < <(awk '{ line[NR] = $0 } END { for (i = NR; i > 0; i--) print line[i] }' "$JOURNAL")
+  mkdir -p "$STATE_DIR/archive/$stamp"
+  mv "$JOURNAL" "$STATE_DIR/archive/$stamp/journal.tsv"
+  [[ -d "$BACKUP_DIR" ]] && mv "$BACKUP_DIR" "$STATE_DIR/archive/$stamp/backups"
+  printf '\n'
+  ok "restored $restored file(s)"
+  [[ -d "$STATE_DIR/reverted/$stamp" ]] && note "the wizard's versions were moved to $STATE_DIR/reverted/$stamp"
+  note "journal and backups archived to $STATE_DIR/archive/$stamp"
 }
 
 # install_file DEST < content: write DEST if it differs. An existing file that
 # differs is shown as a diff and only replaced after confirmation, with a backup.
 install_file() {
-  local dest="$1" tmp
+  local dest="$1" tmp existed=false
   tmp=$(mktemp)
   cat > "$tmp"
   if [[ -f "$dest" ]] && cmp -s "$tmp" "$dest"; then
@@ -284,10 +388,11 @@ install_file() {
     return 0
   fi
   if [[ -f "$dest" ]]; then
+    existed=true
     warn "$dest already exists and differs:"
     diff -u "$dest" "$tmp" | head -40 | sed 's/^/    /' || true
     # content arrived on stdin, so the prompt must read the keyboard directly
-    if ! confirm "Replace it? (a backup is kept)" < /dev/tty; then
+    if ! confirm "Replace it? (a backup is kept)" < "${GHW_TTY:-/dev/tty}"; then
       rm -f "$tmp"
       SKIPPED+=("left $dest unchanged")
       return 0
@@ -296,6 +401,7 @@ install_file() {
   fi
   mkdir -p "$(dirname "$dest")"
   mv "$tmp" "$dest"
+  journal_write "$dest" "$existed"
   CHANGED+=("$dest")
   ok "wrote $dest"
 }
@@ -1886,9 +1992,13 @@ STAGES=(
 TOTAL_STAGES=${#STAGES[@]}
 TOUR_START=19
 
+# Stages whose file changes go into the journal, so --revert can undo them.
+# Both of these write the Ghostty config (and its launcher).
+JOURNALED_STAGES=" stage_ghostty_config stage_ghostty_herdr "
+
 usage() {
   cat <<EOF
-usage: bash $(basename "$0") [--from N | --only N,N | --skip N,N | --tour | --list]
+usage: bash $(basename "$0") [--from N | --only N,N | --skip N,N | --tour | --list | --revert]
 
   (no flags)  run every stage; finished stages report "already done" and move on
   --from N    start at stage N (see --list)
@@ -1896,8 +2006,12 @@ usage: bash $(basename "$0") [--from N | --only N,N | --skip N,N | --tour | --li
   --skip N,N  run everything except these stages, e.g. --skip 11,13 (no GitHub, no yazi)
   --tour      only the guided tour (stages $TOUR_START-$TOTAL_STAGES)
   --list      print the stages and exit
+  --revert    put back the Ghostty config the wizard replaced, as it was before
 EOF
 }
+
+# Sourced (by the tests) rather than run: stop here with the library loaded.
+[[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
 
 FROM=1
 ONLY=""
@@ -1934,10 +2048,17 @@ case "${1:-}" in
     done
     exit 0
     ;;
+  --revert)
+    printf '\n%s%s  Revert%s\n\n' "$BOLD" "$BLUE" "$RESET"
+    revert_all
+    printf '\n'
+    exit 0
+    ;;
   -h | --help) usage; exit 0 ;;
   *) usage; exit 2 ;;
 esac
 
+journal_init
 banner "Ghostty + herdr terminal for coding agents"
 for entry in "${STAGES[@]}"; do
   if (( _STAGE_INDEX + 1 < FROM )) ||
@@ -1947,15 +2068,18 @@ for entry in "${STAGES[@]}"; do
     continue
   fi
   stage "${entry#*:}"
+  JOURNALING=0
+  [[ "$JOURNALED_STAGES" == *" ${entry%%:*} "* ]] && JOURNALING=1
   "${entry%%:*}"
 done
+JOURNALING=0
 
 finish
 if (( ${#CHANGED[@]} )); then
   note "files created or changed:"
   for f in "${CHANGED[@]}"; do note "  - $f"; done
 fi
-if [[ -d "$BACKUP_DIR" ]]; then
+if [[ -n "$(ls -A "$BACKUP_DIR" 2>/dev/null)" ]]; then
   note "backups of what was there before: $BACKUP_DIR"
 fi
 printf '\n  Run %skeys%s for the cheat sheet. Replay the tour: bash %s --tour\n\n' "$BOLD" "$RESET" "$SCRIPT_PATH"

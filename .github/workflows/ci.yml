@@ -23,3 +23,5 @@ jobs:
         run: /bin/bash -n ghostty-herdr-wizard.sh
       - name: Stage list
         run: /bin/bash ghostty-herdr-wizard.sh --list
+      - name: Journal and revert tests
+        run: /bin/bash tests/journal_test.sh
