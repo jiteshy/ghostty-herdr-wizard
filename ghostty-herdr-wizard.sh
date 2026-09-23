@@ -279,7 +279,7 @@ brew_formulae() {
 #   <time>  MODIFY   <path>  <backup ref>  <sha256 written, or "dir">
 #   <time>  CREATE   <path>  <sha256 written, or "dir">
 #   <time>  BLOCK    <path>  <comment leader>  <new|existing>  <sha256 written>
-#   <time>  JSONKEY  <path>  <key>  <prior|<absent>>  <written|<absent>>
+#   <time>  JSONKEY  <path>  <key>  <prior|<absent>>  <written|<absent>|<exists>>
 #   <time>  GITKEY   <path>  <key>  <prior|<absent>>  <written>
 #   <time>  MANUAL   <what to undo in System Settings>  <settings deep link>
 #   <time>  UNDO     <undo_ function --revert calls at the end>
@@ -306,6 +306,21 @@ journal_entry() {
   awk -F'\t' -v p="$1" '$3 == p { line = $0 } END { if (line == "") exit 1; print line }' "$JOURNAL"
 }
 
+# journal_append TYPE FIELD...: add one timestamped line to the journal.
+journal_append() {
+  journal_init
+  local IFS=$'\t'
+  printf '%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$*" >> "$JOURNAL"
+}
+
+# journal_append_once TYPE KEY [FIELD...]: journal_append, unless a TYPE line
+# for KEY is already there.
+journal_append_once() {
+  journal_init
+  awk -F'\t' -v t="$1" -v k="$2" '$2 == t && $3 == k { found = 1 } END { exit !found }' "$JOURNAL" && return 0
+  journal_append "$@"
+}
+
 # journal_write PATH EXISTED: record that the wizard just wrote PATH. EXISTED is
 # true when a file was there before this write. A path keeps the type of its
 # first entry: the wizard's own creation stays a CREATE however often it is
@@ -326,9 +341,11 @@ journal_write() {
     type=CREATE
   fi
   # MODIFY carries the backup ref before the sha; CREATE has no backup.
-  ref=""
-  [[ "$type" == MODIFY ]] && ref="$(backup_ref "$path")"$'\t'
-  printf '%s\t%s\t%s\t%s%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$type" "$path" "$ref" "$hash" >> "$JOURNAL"
+  if [[ "$type" == MODIFY ]]; then
+    journal_append MODIFY "$path" "$(backup_ref "$path")" "$hash"
+  else
+    journal_append "$type" "$path" "$hash"
+  fi
 }
 
 # journal_manual DESCRIPTION LINK: record a change only System Settings can
@@ -336,9 +353,7 @@ journal_write() {
 # --revert prints these as a checklist; it never touches such settings itself.
 journal_manual() {
   [[ "$JOURNALING" == 1 ]] || return 0
-  journal_init
-  awk -F'\t' -v d="$1" '$2 == "MANUAL" && $3 == d { found = 1 } END { exit !found }' "$JOURNAL" && return 0
-  printf '%s\tMANUAL\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$1" "$2" >> "$JOURNAL"
+  journal_append_once MANUAL "$1" "$2"
 }
 
 # journal_undo FUNCTION: a stage with an effect no file entry expresses (herdr
@@ -346,9 +361,7 @@ journal_manual() {
 # every file is back.
 journal_undo() {
   [[ "$JOURNALING" == 1 ]] || return 0
-  journal_init
-  awk -F'\t' -v f="$1" '$2 == "UNDO" && $3 == f { found = 1 } END { exit !found }' "$JOURNAL" && return 0
-  printf '%s\tUNDO\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$1" >> "$JOURNAL"
+  journal_append_once UNDO "$1"
 }
 
 # journaled_dirs: directories the journal records as created or replaced whole.
@@ -537,13 +550,15 @@ revert_all() {
   note "journal and the backups it used archived to $archive"
 }
 
-# revert_stamp: a name for this revert's folders, unique even within a second.
+# revert_stamp: a name for this revert's folders, unique even within a second,
+# that sorts after every earlier one.
 revert_stamp() {
-  local stamp n=1
-  stamp=$(date +%Y%m%d-%H%M%S)
+  local base stamp n=1
+  base=$(date +%Y%m%d-%H%M%S)
+  stamp="$base"
   while [[ -e "$STATE_DIR/reverted/$stamp" || -e "$STATE_DIR/archive/$stamp" ]]; do
     n=$((n + 1))
-    stamp="$(date +%Y%m%d-%H%M%S)-$n"
+    stamp=$(printf '%s-%02d' "$base" "$n")
   done
   printf '%s' "$stamp"
 }
@@ -553,29 +568,40 @@ revert_stamp() {
 # now is relocated first, listed as "in-the-way" so a second --restore doesn't
 # swap it straight back; it stays under reverted/ like everything else.
 revert_restore() {
-  local dir="" candidate stamp path lines=() i
-  for candidate in "$STATE_DIR"/reverted/*/manifest; do
-    [[ -f "$candidate" ]] && dir="${candidate%/manifest}"
+  local dir="" candidate stamp path lines=() i failed=0
+  # The newest folder a revert made (a restore's own "in-the-way" folders
+  # don't count). Once that one is restored, there is nothing left to restore.
+  for candidate in "$STATE_DIR"/reverted/*; do
+    [[ -f "$candidate/manifest" || -f "$candidate/manifest.restored" ]] && dir="$candidate"
   done
-  if [[ -z "$dir" ]]; then
-    say "Nothing to restore: no revert has moved anything aside."
+  if [[ -z "$dir" || ! -f "$dir/manifest" ]]; then
+    say "Nothing to restore: the last revert's changes are already back, or no revert moved anything."
     return 0
   fi
   stamp=$(revert_stamp)
   while IFS= read -r path; do lines+=("$path"); done < "$dir/manifest"
   for (( i = ${#lines[@]} - 1; i >= 0; i-- )); do
     path="${lines[$i]}"
-    if [[ ! -e "$dir/$(backup_ref "$path")" ]]; then
-      warn "nothing kept for $path under $dir, skipped"
+    # Already put back by an earlier, partly failed --restore.
+    [[ -e "$dir/$(backup_ref "$path")" ]] || continue
+    if [[ -e "$path" ]] && ! relocate "$path" "$stamp" in-the-way; then
+      warn "couldn't put back $path: couldn't move what's there now aside"
+      failed=$((failed + 1))
       continue
     fi
-    if [[ -e "$path" ]]; then relocate "$path" "$stamp" in-the-way || { warn "couldn't move $path aside, skipped"; continue; }; fi
-    mkdir -p "$(dirname "$path")"
-    mv "$dir/$(backup_ref "$path")" "$path" && ok "put back $path"
+    if mkdir -p "$(dirname "$path")" 2>/dev/null && mv "$dir/$(backup_ref "$path")" "$path"; then
+      ok "put back $path"
+    else
+      warn "couldn't put back $path"
+      failed=$((failed + 1))
+    fi
   done
-  mv "$dir/manifest" "$dir/manifest.restored"
   [[ -d "$STATE_DIR/reverted/$stamp" ]] && note "what was in the way was moved to $STATE_DIR/reverted/$stamp"
-  return 0
+  if (( failed )); then
+    warn "$failed item(s) are still under $dir; fix that and run --revert --restore again"
+    return 0
+  fi
+  mv "$dir/manifest" "$dir/manifest.restored"
 }
 
 # revert_checklist "DESCRIPTION<tab>LINK"...: the System Settings changes the
@@ -627,6 +653,22 @@ revert_create() {
   return 1
 }
 
+# revert_key_ok LABEL CURRENT PRIOR WRITTEN: whether to set a key back to PRIOR.
+# No if it already is. If it isn't what the wizard wrote either, the user
+# changed it since: show both values and ask, defaulting to keeping theirs.
+revert_key_ok() {
+  local label="$1" current="$2" prior="$3" written="$4"
+  [[ "$current" == "$prior" ]] && return 1
+  [[ "$current" == "$written" ]] && return 0
+  printf '\n'
+  warn "$label has changed since the wizard set it."
+  note "  now:            $current"
+  note "  reverting sets: $prior"
+  confirm "Revert it anyway? (No keeps your version)" && return 0
+  KEPT+=("$label")
+  return 1
+}
+
 # revert_json_key PATH KEY PRIOR WRITTEN STAMP: put one key back as it was, or
 # delete it if it wasn't there. Nothing else in the file is touched. KEY []
 # marks a file the wizard created: it is moved away once nothing else is in it.
@@ -648,17 +690,7 @@ revert_json_key() {
     SKIPPED+=("revert $label in $path by hand")
     return 1
   fi
-  [[ "$current" == "$prior" ]] && return 0
-  if [[ "$current" != "$written" ]]; then
-    printf '\n'
-    warn "$label in $path has changed since the wizard set it."
-    note "  now:            $current"
-    note "  reverting sets: $prior"
-    if ! confirm "Revert it anyway? (No keeps your version)"; then
-      KEPT+=("$label in $path")
-      return 0
-    fi
-  fi
+  revert_key_ok "$label in $path" "$current" "$prior" "$written" || return 0
   staged="$path.ghostty-herdr-wizard-restore"
   jq --argjson p "$key" --arg v "$prior" \
     'if $v == "<absent>" then delpaths([$p]) else setpath($p; $v | fromjson) end' "$path" > "$staged" &&
@@ -668,19 +700,8 @@ revert_json_key() {
 
 # revert_git_key KEY PRIOR WRITTEN: put one global git setting back, or unset it.
 revert_git_key() {
-  local key="$1" prior="$2" written="$3" current='<absent>'
-  git config --global --get "$key" >/dev/null 2>&1 && current=$(git config --global --get "$key")
-  [[ "$current" == "$prior" ]] && return 0
-  if [[ "$current" != "$written" ]]; then
-    printf '\n'
-    warn "git $key has changed since the wizard set it."
-    note "  now:            $current"
-    note "  reverting sets: $prior"
-    if ! confirm "Revert it anyway? (No keeps your version)"; then
-      KEPT+=("git $key")
-      return 0
-    fi
-  fi
+  local key="$1" prior="$2" written="$3"
+  revert_key_ok "git $key" "$(git_global_value "$key")" "$prior" "$written" || return 0
   if [[ "$prior" == '<absent>' ]]; then
     git config --global --unset-all "$key" || return 1
   else
@@ -805,11 +826,10 @@ strip_block() {
 journal_block() {
   [[ "$JOURNALING" == 1 ]] || return 0
   local prior
-  journal_init
   if prior=$(journal_entry "$1") && [[ "$(printf '%s' "$prior" | cut -f2)" == BLOCK ]]; then
     set -- "$1" "$2" "$(printf '%s' "$prior" | cut -f5)"
   fi
-  printf '%s\tBLOCK\t%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$1" "$2" "$3" "$(sha256 "$1")" >> "$JOURNAL"
+  journal_append BLOCK "$1" "$2" "$3" "$(sha256 "$1")"
 }
 
 # ── Key-level JSON changes ────────────────────────────────────────────────
@@ -818,8 +838,8 @@ journal_block() {
 # each with its value from before the wizard first touched it:
 #   <time>  JSONKEY  <path>  <key as a JSON path array>  <prior|<absent>>  <written|<absent>>
 # and --revert undoes those keys alone. The file is still backed up once, as a
-# safety net, but never restored whole. A key of [] with prior <absent> means
-# the wizard created the file itself.
+# safety net, but never restored whole. The key [] (prior <absent>, written
+# <exists>) means the wizard created the file itself.
 
 # enc(DOC; KEY): the value at KEY as compact JSON, or <absent>.
 # shellcheck disable=SC2016
@@ -844,10 +864,10 @@ json_track() {
   [[ -f "$file" ]] && after=$(jq -c . "$file" 2>/dev/null || printf '{}')
   if [[ "$before" != "$after" ]]; then
     CHANGED+=("$file")
-    $existed || journal_json_key "$file" '[]' '<absent>' '<exists>'
+    $existed || journal_key JSONKEY "$file" '[]' '<absent>' '<exists>'
     local key prior written
     while IFS=$'\t' read -r key prior written; do
-      journal_json_key "$file" "$key" "$prior" "$written"
+      journal_key JSONKEY "$file" "$key" "$prior" "$written"
     done < <(json_changes "$before" "$after")
   fi
   return "$status"
@@ -860,6 +880,8 @@ json_set() {
   shift
   json_track "$file" _json_apply "$file" "$@"
 }
+
+# _json_apply FILE FILTER [JQ ARGS...]: json_set's write, run under json_track.
 _json_apply() {
   local file="$1" tmp
   shift
@@ -888,37 +910,35 @@ json_changes() {
     | [($p | tojson), enc($a; $p), enc($b; $p)] | join("\t")'
 }
 
-# journal_json_key FILE KEY PRIOR WRITTEN: append a JSONKEY entry. A key the
-# journal already knows keeps its first-ever prior value.
-journal_json_key() {
+# journal_key TYPE FILE KEY PRIOR WRITTEN: append a JSONKEY or GITKEY entry. A
+# key the journal already knows keeps its first-ever prior value.
+journal_key() {
   [[ "$JOURNALING" == 1 ]] || return 0
   local first
   journal_init
-  first=$(awk -F'\t' -v p="$1" -v k="$2" '$2 == "JSONKEY" && $3 == p && $4 == k { print $5; exit }' "$JOURNAL")
-  [[ -n "$first" ]] && set -- "$1" "$2" "$first" "$4"
-  printf '%s\tJSONKEY\t%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$1" "$2" "$3" "$4" >> "$JOURNAL"
+  first=$(awk -F'\t' -v t="$1" -v p="$2" -v k="$3" '$2 == t && $3 == p && $4 == k { print $5; exit }' "$JOURNAL")
+  [[ -n "$first" ]] && set -- "$1" "$2" "$3" "$first" "$5"
+  journal_append "$@"
+}
+
+# git_global_value KEY: KEY's global git value, or <absent>.
+git_global_value() {
+  git config --global --get "$1" 2>/dev/null || printf '<absent>'
 }
 
 # git_set KEY VALUE: set a global git config value if it isn't already.
 # Journaled key by key like the JSON settings, since the user edits their git
 # config too:  <time>  GITKEY  ~/.gitconfig  <key>  <prior|<absent>>  <written>
 git_set() {
-  local current prior
-  current=$(git config --global --get "$1" || true)
-  if [[ "$current" == "$2" ]]; then
+  local prior
+  prior=$(git_global_value "$1")
+  if [[ "$prior" == "$2" ]]; then
     ok "git $1 = $2"
     return 0
   fi
-  prior="$current"
-  git config --global --get "$1" >/dev/null 2>&1 || prior='<absent>'
   run git config --global "$1" "$2"
-  [[ "$JOURNALING" == 1 ]] || return 0
-  [[ "$(git config --global --get "$1" || true)" == "$2" ]] || return 0
-  journal_init
-  local first
-  first=$(awk -F'\t' -v k="$1" '$2 == "GITKEY" && $4 == k { print $5; exit }' "$JOURNAL")
-  [[ -n "$first" ]] && prior="$first"
-  printf '%s\tGITKEY\t%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$HOME/.gitconfig" "$1" "$prior" "$2" >> "$JOURNAL"
+  [[ "$(git_global_value "$1")" == "$2" ]] && journal_key GITKEY "$HOME/.gitconfig" "$1" "$prior" "$2"
+  return 0
 }
 
 # ctrl_space_taken: true while macOS still claims Ctrl-Space for input sources.
@@ -1285,7 +1305,7 @@ stage_free_ctrl_space() {
       SKIPPED+=("confirm Ctrl-Space is free: System Settings → Keyboard → Keyboard Shortcuts → Input Sources")
     else
       ok "Ctrl-Space is free"
-      journal_manual "Turn 'Select the previous input source' (Ctrl-Space) back on: Keyboard → Keyboard Shortcuts → Input Sources" \
+      journal_manual "Turn 'Select the previous input source' (^Space) and 'Select next source in Input menu' (^⌥Space) back on: Keyboard → Keyboard Shortcuts → Input Sources" \
         "x-apple.systempreferences:com.apple.Keyboard-Settings.extension"
     fi
   else
@@ -2113,8 +2133,10 @@ stage_permissions() {
   if confirm "Open the Accessibility settings now?"; then
     open_url "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
     step "Turn Ghostty on (use + to add it from /Applications if missing)."
-    journal_manual "Turn off Ghostty's Accessibility access, if you like: Privacy & Security → Accessibility" \
-      "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+    if confirm "Is Ghostty turned on there now?"; then
+      journal_manual "Turn off Ghostty's Accessibility access, if you like: Privacy & Security → Accessibility" \
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+    fi
   fi
   note "If Ctrl-\` does nothing yet, it starts working after the next Ghostty launch."
   pause "Press Enter when done"

@@ -513,6 +513,44 @@ test_restore_brings_the_last_relocation_back() {
   cleanup
 }
 
+test_restore_never_reaches_back_to_an_older_revert() {
+  new_home
+  wizard 'journal_init; JOURNALING=1; printf "one\n" | install_file "$HOME/.config/a"'
+  cli --revert
+  wizard 'journal_init; JOURNALING=1; printf "two\n" | install_file "$HOME/.config/b"'
+  cli --revert
+  cli --revert --restore
+  check "[[ -f '$H/.config/b' ]]" "latest revert's file restored"
+  cli --revert --restore
+  check "[[ ! -e '$H/.config/a' ]]" "a second --restore doesn't bring back an older revert's file"
+  check "grep -qi 'nothing to restore' '$T/out'" "says there is nothing to restore"
+  cleanup
+}
+
+test_restore_that_fails_can_be_retried() {
+  new_home
+  wizard 'journal_init; JOURNALING=1; printf "x\n" | install_file "$HOME/.config/a/file"'
+  cli --revert
+  # Something the restore can't move out of the way: a parent that's a file.
+  mkdir -p "$H/.config"; rmdir "$H/.config/a"; printf 'blocker\n' > "$H/.config/a"
+  cli --revert --restore
+  check "grep -q \"couldn't put back\" '$T/out'" "the failure is reported"
+  check "[[ -n \"\$(ls '$STATE'/reverted/*/manifest 2>/dev/null)\" ]]" "manifest kept so --restore can be retried"
+  cleanup
+}
+
+test_same_second_stamps_sort_in_order() {
+  new_home
+  local s last=""
+  mkdir -p "$STATE/reverted"
+  for s in 1 2 3 4 5 6 7 8 9 10 11; do
+    last=$(HOME="$H" bash -c "source '$WIZARD'; revert_stamp")
+    mkdir "$STATE/reverted/$last"
+  done
+  check "[[ \"\$(ls '$STATE/reverted' | tail -1)\" == '$last' ]]" "the last stamp made sorts last"
+  cleanup
+}
+
 test_restore_with_nothing_relocated_is_a_clean_no_op() {
   new_home
   cli --revert --restore
