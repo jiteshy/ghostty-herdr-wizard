@@ -30,19 +30,24 @@ new_home() {
   STATE="$H/.ghostty-herdr-wizard"
   mkdir -p "$H"
   printf 'y\ny\ny\ny\ny\ny\n' > "$T/tty"
+  : > "$T/answers"
 }
-cleanup() { rm -rf "$T"; }
+# KEEP=1 leaves each sandbox in place (and prints where) for a closer look.
+cleanup() { [[ -n "${KEEP:-}" ]] && echo "kept $T" || rm -rf "$T"; }
 
 # wizard CODE: one "run" of the wizard. Sources the library into a subshell
 # (so state never leaks between runs) and evaluates CODE. Output goes to $T/out.
+# Questions read from stdin (such as revert's drift prompts) are answered from
+# $T/answers, one line each; an empty file means Enter, the default, for all.
 wizard() {
   (
-    export HOME="$H" GHW_TTY="$T/tty"
+    export HOME="$H" GHW_TTY="$T/tty" GIT_CONFIG_NOSYSTEM=1
+    unset XDG_CONFIG_HOME
     # shellcheck source=/dev/null
     source "$WIZARD"
     set +e
     eval "$1"
-  ) > "$T/out" 2>&1
+  ) < "$T/answers" > "$T/out" 2>&1
 }
 # cli ARGS...: run the real script as a user would. Enter for every pause, or
 # the answers in the file CLI_INPUT names.
@@ -61,10 +66,11 @@ fake_brew() {
 sha() { shasum -a 256 "$1" | awk '{print $1}'; }
 journal_lines() { grep -c . "$STATE/journal.tsv" 2>/dev/null || true; }
 
-# run_tests: run every test_* function, print the tally, fail if any failed.
+# run_tests [NAME...]: run every test_* function, or just the named ones, print
+# the tally, fail if any failed.
 run_tests() {
   local t
-  for t in $(declare -F | awk '{print $3}' | grep '^test_'); do
+  for t in ${@:-$(declare -F | awk '{print $3}' | grep '^test_')}; do
     printf '%s\n' "$t"
     "$t"
   done
