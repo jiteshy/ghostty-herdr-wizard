@@ -152,17 +152,17 @@ test_choosing_plain_text_saves_it_and_skips_the_font() {
     fake_brew
     fake_bat
     # banner, plain text, projects folder (Enter), don't create it, no tabs, done
-    printf '\n2\n\nn\nn\n\n' > "$T/answers"
+    printf '\n2\n\nn\n3\n\n' > "$T/answers"
     CLI_INPUT="$T/answers" cli --only choices
     check "grep -qx 'GLYPHS=off' '$STATE/choices.env'" "answer 2 saves plain text"
     cli --only install
     check "grep -q 'formula' '$T/brew.log'" "the install stage ran brew"
     check "! grep -q 'font-jetbrains-mono-nerd-font' '$T/brew.log'" "plain text: no Nerd Font install"
-    # banner, don't reuse, Enter for icons (keeps plain text), Enter, n, n, done
-    printf '\nn\n\n\nn\nn\n\n' > "$T/answers"
+    # banner, don't reuse, Enter for icons (keeps plain text), Enter, don't create, Enter keeps no tabs, done
+    printf '\nn\n\n\nn\n\n\n' > "$T/answers"
     CLI_INPUT="$T/answers" cli --only choices
     check "grep -qx 'GLYPHS=off' '$STATE/choices.env'" "Enter on a re-run keeps the saved answer"
-    printf '\nn\n1\n\nn\nn\n\n' > "$T/answers"
+    printf '\nn\n1\n\nn\n\n\n' > "$T/answers"
     CLI_INPUT="$T/answers" cli --only choices
     check "grep -qx 'GLYPHS=on' '$STATE/choices.env'" "answer 1 saves icons"
     cli --only install

@@ -75,37 +75,37 @@ choices_run() {
 
 test_choices_are_asked_once_and_saved() {
   new_home
-  # banner, plain text, projects folder, create it, default tabs, not those, my names, done
-  choices_run '' 2 "$H/repos" y y n 'agents,server' ''
+  # banner, plain text, projects folder, create it, my tab names (four of them), done
+  choices_run '' 2 "$H/repos" y 2 ai code srv diff ''
   check "grep -qx 'GLYPHS=off' '$STATE/choices.env'" "icons answer saved"
   check "grep -qx 'PROJECTS_DIR=$H/repos' '$STATE/choices.env'" "projects folder saved"
-  check "grep -qx 'TABS=agents,server' '$STATE/choices.env'" "tab names saved"
+  check "grep -qx 'TABS=ai,code,srv,diff' '$STATE/choices.env'" "tab names saved"
   check "[[ -d '$H/repos' ]]" "the projects folder was created"
   wizard 'printf "%s|%s|%s" "$GLYPHS" "$DEFAULT_TABS" "$(current_projects_dir)"'
-  check "[[ '$(cat "$T/out")' == 'off|agents,server|$H/repos' ]]" \
+  check "[[ '$(cat "$T/out")' == 'off|ai,code,srv,diff|$H/repos' ]]" \
     "later stages start from the saved answers (got '$(cat "$T/out")')"
   cleanup
 }
 
 test_a_rerun_offers_last_times_answers() {
   new_home
-  choices_run '' 2 "$H/repos" y y y ''
+  choices_run '' 2 "$H/repos" y 1 ''
   cp "$STATE/choices.env" "$T/first"
   choices_run '' y
   check "grep -q \"Last time's answers\" '$T/out'" "a re-run shows last time's answers"
   same_bytes "$STATE/choices.env" "$T/first" "yes keeps them unchanged"
   check "! grep -q 'Projects folder' '$T/out'" "yes asks nothing more"
   # No: ask again, Enter keeps each answer, no default tabs this time.
-  choices_run '' n '' '' n ''
+  choices_run '' n '' '' 3 ''
   check "grep -qx 'GLYPHS=off' '$STATE/choices.env' && grep -qx 'PROJECTS_DIR=$H/repos' '$STATE/choices.env'" \
     "no asks again, Enter keeping each answer"
-  check "grep -qx 'TABS=' '$STATE/choices.env'" "no default tabs is saved as empty"
+  check "grep -qx 'TABS=none' '$STATE/choices.env'" "no default tabs is saved as none"
   wizard 'printf "[%s]" "$DEFAULT_TABS"'
-  check "[[ '$(cat "$T/out")' == '[]' ]]" "saved empty means no default tabs (got '$(cat "$T/out")')"
-  # Changing their mind: yes to tabs, yes to the standard set.
-  choices_run '' n '' '' y y ''
-  check "grep -qx 'TABS=agents,code,dev server,git review' '$STATE/choices.env'" \
-    "after no tabs, yes offers the standard set again"
+  check "[[ '$(cat "$T/out")' == '[]' ]]" "saved none means no default tabs (got '$(cat "$T/out")')"
+  # Changing their mind: the suggested four again.
+  choices_run '' n '' '' 1 ''
+  check "grep -qx 'TABS=agents,source code,local server,git review' '$STATE/choices.env'" \
+    "after no tabs, the suggested four are one answer away"
   cleanup
 }
 
