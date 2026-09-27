@@ -1089,9 +1089,12 @@ keybind = cmd+d=text:\x00v
 keybind = cmd+shift+d=text:\x00-
 keybind = cmd+t=text:\x00c
 keybind = cmd+p=text:\x00g
-keybind = cmd+o=text:\x00m
-keybind = cmd+e=text:\x00f
-keybind = cmd+shift+g=text:\x00d
+EOF
+  # The popups herdr only has for selected tools (see herdr_config).
+  selected jumper && printf '%s\n' 'keybind = cmd+o=text:\x00m'
+  selected files && printf '%s\n' 'keybind = cmd+e=text:\x00f'
+  selected review && printf '%s\n' 'keybind = cmd+shift+g=text:\x00d'
+  cat <<'EOF'
 keybind = cmd+shift+enter=text:\x00z
 # Both spellings of [ and ]: Ghostty's own cmd+shift+[ / ] switch Ghostty tabs.
 keybind = cmd+shift+bracket_left=text:\x00,
@@ -1378,8 +1381,10 @@ show_clusters() {
 # toggle_cluster N: tick or untick the Nth group on the screen.
 toggle_cluster() {
   local entry key
-  [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= ${#CLUSTERS[@]} )) || return 0
-  entry=${CLUSTERS[$(($1 - 1))]}
+  [[ "$1" =~ ^[0-9]+$ ]] || return 0
+  local n=$((10#$1))   # base 10, so 08 is 8, not a bad octal number
+  (( n >= 1 && n <= ${#CLUSTERS[@]} )) || return 0
+  entry=${CLUSTERS[$((n - 1))]}
   key=${entry%%:*}
   if [[ "$key" == icons ]]; then
     if [[ "$GLYPHS" == on ]]; then GLYPHS=off; else GLYPHS=on; fi
@@ -1512,8 +1517,8 @@ stage_formulae() {
   return 0
 }
 
-# install_formulae: every formula the install stage brews, once each: those of
-# every stage (so of every selected group) except the ones --skip names. --only and --from don't narrow it,
+# install_formulae: every formula the install stage brews, once each: those
+# of every stage (so of every selected group) except the ones --skip names. --only and --from don't narrow it,
 # so --only install installs everything.
 install_formulae() {
   local entry slug f seen=" "
@@ -1790,8 +1795,9 @@ fi
 EOF
 }
 
-# zprofile_block PROJECTS_LINE: the wizard's block in ~/.zprofile, with lines only for
-# the selected tools. PROJECTS_LINE is the projects folder as it should be written.
+# zprofile_block PROJECTS_LINE: the wizard's block in ~/.zprofile, with lines
+# only for the selected tools. PROJECTS_LINE is the projects folder as written
+# there.
 zprofile_block() {
   printf '%s\n' 'export PATH="$HOME/.local/bin:$PATH"'
   selected editor && printf '%s\n' 'export EDITOR=nvim VISUAL=nvim'
@@ -2409,8 +2415,6 @@ TAIL
   fi
 }
 
-# herdr_config: the full herdr config. The sidebar's agent indicators follow
-# the glyph switch.
 # herdr_popup KEY COMMAND DESCRIPTION SIZE: one popup keybinding for herdr's
 # config, a SIZE-sized window running COMMAND in a login shell.
 herdr_popup() {
@@ -2419,6 +2423,8 @@ herdr_popup() {
   printf 'description = "%s"\nwidth = "%s"\nheight = "%s"\n\n' "$3" "$4" "$4"
 }
 
+# herdr_config: the full herdr config. The sidebar's agent indicators follow
+# the glyph switch.
 herdr_config() {
   cat <<'EOF'
 # herdr config, written by ghostty-herdr-wizard.sh
@@ -2890,7 +2896,27 @@ tour_habits() {
   pause "Press Enter to finish"
 }
 
+# cheatsheet: the cheat sheet `keys` opens, with only the selected tools. A
+# line of cheatsheet_text tagged {KEY} is kept (untagged) only while the group
+# KEY is selected; {popups} while any tool with a herdr popup is.
 cheatsheet() {
+  local entry keep=" "
+  for entry in "${CLUSTERS[@]}"; do
+    selected "${entry%%:*}" && keep+="${entry%%:*} "
+  done
+  if selected review || selected files || selected github; then keep+="popups "; fi
+  cheatsheet_text | awk -v keep="$keep" '
+    match($0, /^[{][a-z]+[}]/) {
+      line = substr($0, RLENGTH + 1)
+      sub(/^ /, "", line)
+      if (index(keep, " " substr($0, 2, RLENGTH - 2) " ")) print line
+      next
+    }
+    { print }'
+}
+
+# cheatsheet_text: every line of the cheat sheet, tagged by group (see cheatsheet).
+cheatsheet_text() {
   cat <<'EOF'
 # Ghostty + herdr cheat sheet
 
@@ -2910,7 +2936,7 @@ Open any time with `keys`. **prefix** = Ctrl-Space: press, release, then the key
 
 | Keys | Action |
 |---|---|
-| prefix `m` · Cmd-O | open a project as a new workspace |
+{jumper} | prefix `m` · Cmd-O | open a project as a new workspace |
 | prefix `,` / `.` · Cmd-Shift-[ / ] | previous / next workspace |
 | prefix `w` | workspace list |
 | prefix `g` · Cmd-P | goto picker: any workspace, tab or agent |
@@ -2944,20 +2970,21 @@ re-running the wizard with `--only choices,herdr`, or edit
 | prefix `[` | copy mode: `v` select, `y` copy, `/` search |
 | prefix `b` | toggle sidebar |
 
-## Popups
-
-| Keys | Opens |
-|---|---|
-| prefix `d` · Cmd-Shift-G | lazygit |
-| prefix `f` · Cmd-E | yazi |
-| prefix `i` | gh dash (PRs, issues) |
+{popups} ## Popups
+{popups}
+{popups} | Keys | Opens |
+{popups} |---|---|
+{review} | prefix `d` · Cmd-Shift-G | lazygit |
+{files} | prefix `f` · Cmd-E | yazi |
+{github} | prefix `i` | gh dash (PRs, issues) |
+{popups}
 
 ## Claude Code
 
 | Command | Does |
 |---|---|
 | `claude --continue` / `--resume` | resume the latest / pick a conversation |
-| Ctrl-G | write the prompt in nvim |
+{editor} | Ctrl-G | write the prompt in nvim |
 | `@path/to/file` | point Claude at a file |
 | `/rename`, `/clear`, `/compact` | name session, start fresh, free context |
 | `/effort`, `/model` | change reasoning effort / model |
@@ -2966,22 +2993,24 @@ re-running the wizard with `--only choices,herdr`, or edit
 
 | Command | Does |
 |---|---|
-| `p` | fuzzy-jump into a project |
-| `y` | yazi; shell follows you to where you quit |
-| Ctrl-R / Ctrl-T / Alt-C | fuzzy history / insert file / cd |
-| `ll`, `lt` | list with git status / tree |
-| `v`, `lg` | nvim / lazygit |
+{jumper} | `p` | fuzzy-jump into a project |
+{files} | `y` | yazi; shell follows you to where you quit |
+{jumper} | Ctrl-R / Ctrl-T / Alt-C | fuzzy history / insert file / cd |
+{jumper} | `ll`, `lt` | list with git status / tree |
+{editor} | `v` | nvim |
+{review} | `lg` | lazygit |
 | `gd` | git diff |
 
-## lazygit
-
-`space` stage · `enter` on a file to stage single lines · `c` commit · `P` push · `p` pull · `d` discard · `?` help
-
-## Neovim (LazyVim)
-
-`Space` menu · `Space Space` find file · `Space /` grep · `Space e` file tree · `gd` definition · `gr` references · `K` hover · `Space ca` code action · `Space cf` format
-
-Reviewing agent changes: `]h` / `[h` next / previous hunk · `Space ghp` preview hunk · `Space gv` Diffview review · `Space gV` close · `Space gs` changed files · `Space gg` lazygit
+{review} ## lazygit
+{review}
+{review} `space` stage · `enter` on a file to stage single lines · `c` commit · `P` push · `p` pull · `d` discard · `?` help
+{review}
+{editor} ## Neovim (LazyVim)
+{editor}
+{editor} `Space` menu · `Space Space` find file · `Space /` grep · `Space e` file tree · `gd` definition · `gr` references · `K` hover · `Space ca` code action · `Space cf` format
+{editor}
+{editor} Reviewing agent changes: `]h` / `[h` next / previous hunk · `Space ghp` preview hunk · `Space gv` Diffview review · `Space gV` close · `Space gs` changed files · `Space gg` lazygit
+{editor}
 
 ## Ghostty
 
@@ -3011,8 +3040,11 @@ STAGES=(
 
 # stage_selected NAME: true if the choices allow the stage NAME: the fixed
 # stages always, a group's stage only while one of its groups is selected.
+# shell is fixed too: its blocks also hold Ghostty's shell integration, history,
+# `keys`, and the lines of the prompt, editor, review and file manager groups.
 stage_selected() {
   local entry configures=false
+  [[ "$1" == shell ]] && return 0
   for entry in "${CLUSTERS[@]}"; do
     [[ "${entry##*:}" == "$1" ]] || continue
     configures=true
@@ -3154,7 +3186,7 @@ JOURNALING=1
 for entry in "${STAGES[@]}"; do
   if ! stage_selected "${entry%%:*}"; then
     # Named on purpose but declined in the choices: say so rather than nothing.
-    if [[ "$ONLY" == *",${entry%%:*},"* ]]; then
+    if [[ "$ONLY" == *",${entry%%:*},"* || "$FROM" == "${entry%%:*}" ]]; then
       note "${entry%%:*}: not selected in your choices, so skipped (change them: --only choices)"
     fi
     continue

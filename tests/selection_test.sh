@@ -56,6 +56,16 @@ test_numbers_untick_and_tick_groups() {
   cleanup
 }
 
+test_a_leading_zero_is_still_a_group_number() {
+  new_home
+  # 08 unticks GitHub (not a bad octal number); 0 and 42 are ignored
+  choices_run '' '08 0 42' '' "$H/repos" y ''
+  check "[[ '$(saved_tools)' == 'prompt,jumper,typing,editor,review,files,statusline' ]]" \
+    "08 is group 8 (got '$(saved_tools)')"
+  check "! grep -q 'value too great' '$T/out'" "no arithmetic error"
+  cleanup
+}
+
 test_nothing_selected_is_saved_as_none() {
   new_home
   # no project jumper, so no projects folder question
@@ -171,9 +181,10 @@ test_herdr_popups_only_open_selected_tools() {
 test_stage_count_follows_the_selection() {
   new_home
   with_tools none 'printf "%s" "$TOTAL_STAGES"'
-  check "[[ '$(cat "$T/out")' == 6 ]]" "nothing selected: the 5 fixed stages and the tour (got '$(cat "$T/out")')"
-  with_tools jumper,typing 'printf "%s" "$TOTAL_STAGES"'
-  check "[[ '$(cat "$T/out")' == 7 ]]" "both shell groups share one shell stage (got '$(cat "$T/out")')"
+  check "[[ '$(cat "$T/out")' == 7 ]]" \
+    "nothing selected: the 5 fixed stages, shell and the tour (got '$(cat "$T/out")')"
+  with_tools jumper,typing,prompt 'printf "%s" "$TOTAL_STAGES"'
+  check "[[ '$(cat "$T/out")' == 8 ]]" "both shell groups share the shell stage (got '$(cat "$T/out")')"
   with_tools "$RECOMMENDED" 'printf "%s" "$TOTAL_STAGES"'
   check "[[ '$(cat "$T/out")' == 13 ]]" "everything selected: all 13 (got '$(cat "$T/out")')"
   cleanup
@@ -226,6 +237,53 @@ test_selected_status_line_is_set_up_without_asking_again() {
     printf '%s %s\n' "$PASSES" "$FAILS" > "$T/tally"
   )
   read -r PASSES FAILS < "$T/tally"
+  cleanup
+}
+
+test_ghostty_cmd_keys_only_open_selected_popups() {
+  new_home
+  with_tools none 'ghostty_config'
+  check "! grep -qE 'cmd\+(o|e|shift\+g)=' '$T/out'" "nothing selected: no Cmd key for a missing popup"
+  check "grep -q 'cmd+d=text' '$T/out'" "herdr's own keys stay"
+  with_tools jumper,files,review 'ghostty_config'
+  check "grep -q 'cmd+o=text:.x00m' '$T/out' && grep -q 'cmd+e=text:.x00f' '$T/out' && grep -q 'cmd+shift+g=text:.x00d' '$T/out'" \
+    "Cmd-O, Cmd-E and Cmd-Shift-G come with the jumper, file manager and review"
+  cleanup
+}
+
+# Other groups (starship, the editor, lazygit, yazi) also put lines in the
+# shell block, and Ghostty integration and history belong to every setup.
+test_shell_stage_runs_without_either_shell_group() {
+  new_home
+  ( # subshell: the fake brew on PATH never outlives this test
+    fake_brew
+    mkdir -p "$STATE"
+    printf 'TOOLS=prompt,editor\n' > "$STATE/choices.env"
+    cli --only shell
+    check "grep -q 'starship init' '$H/.zshrc' && grep -q \"alias v='nvim'\" '$H/.zshrc'" \
+      "starship and the editor alias are written"
+    check "grep -q 'EDITOR=nvim' '$H/.zprofile'" "and EDITOR"
+    check "grep -q 'ghostty-integration' '$H/.zshrc'" "with Ghostty's shell integration"
+    check "[[ -f '$H/.config/ghostty-herdr-cheatsheet.md' ]]" "and the cheat sheet keys opens"
+    check "! grep -q '^install' '$T/brew.log'" "without installing either shell group's tools"
+    printf '%s %s\n' "$PASSES" "$FAILS" > "$T/tally"
+  )
+  read -r PASSES FAILS < "$T/tally"
+  cleanup
+}
+
+test_cheat_sheet_lists_only_selected_tools() {
+  new_home
+  with_tools none 'cheatsheet'
+  check "! grep -qE 'Popups|lazygit|yazi|gh dash|LazyVim|Cmd-O|fuzzy|\{' '$T/out'" \
+    "nothing selected: no shortcut for a missing tool, and no tags left"
+  check "grep -q '## Workspaces and agents' '$T/out' && grep -q '| \`gd\` | git diff |' '$T/out'" \
+    "herdr's own keys and plain git stay"
+  with_tools files,editor 'cheatsheet'
+  check "grep -q '## Popups' '$T/out' && grep -q 'prefix \`f\` · Cmd-E' '$T/out' && grep -q '## Neovim' '$T/out'" \
+    "a selected tool's rows and sections are there"
+  check "! grep -qE 'prefix \`d\`|prefix \`i\`|## lazygit' '$T/out'" "the declined ones' are not"
+  check "[[ '$(grep -c '^$' "$T/out")' -gt 10 ]] && ! grep -q '^ ' '$T/out'" "blank lines survive, untagged"
   cleanup
 }
 
