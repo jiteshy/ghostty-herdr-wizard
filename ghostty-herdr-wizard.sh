@@ -1392,23 +1392,22 @@ node_manager() {
   path=$(node_path) || return 0
   case "$path" in
     */.nvm/*) echo nvm ;;
-    *fnm*) echo fnm ;;
+    */fnm/* | */fnm_multishells/*) echo fnm ;;
     */.volta/*) echo volta ;;
     */.asdf/*) echo asdf ;;
-    *mise*) echo mise ;;
+    */mise/*) echo mise ;;
     "$BREW_PREFIX"/opt/*/bin/node)
       formula=${path#"$BREW_PREFIX"/opt/}
       echo "Homebrew ${formula%%/*}"
       ;;
     "$BREW_PREFIX"/*)
-      # $BREW_PREFIX/bin/node links into the Cellar: ../Cellar/<formula>/<version>/bin/node
+      # Homebrew's links into its Cellar: ../Cellar/<formula>/<version>/bin/node.
+      # Anything else there (the nodejs.org installer uses /usr/local) isn't brew's.
       target=$(readlink "$path" 2>/dev/null || true)
-      formula=node
       if [[ "$target" == *Cellar/* ]]; then
         formula=${target#*Cellar/}
-        formula=${formula%%/*}
+        echo "Homebrew ${formula%%/*}"
       fi
-      echo "Homebrew $formula"
       ;;
   esac
 }

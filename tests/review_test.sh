@@ -147,6 +147,21 @@ test_the_gate_names_the_manager_and_its_exact_command() {
   cleanup; PATH="$saved"
 }
 
+test_the_manager_is_only_named_when_the_path_says_so() {
+  local saved="$PATH"
+  new_home
+  fake_node v20.19.2 "$T/premise/fnmtools/bin"
+  wizard 'node_gate'
+  check "! grep -q '(via' '$T/out'" "'mise' or 'fnm' inside a folder name isn't a manager (got: $(head -n1 "$T/out"))"
+  cleanup; PATH="$saved"
+
+  new_home
+  fake_node v20.19.2 "$T/usr-local/bin"
+  wizard "BREW_PREFIX='$T/usr-local'; node_gate"
+  check "! grep -q 'Homebrew' '$T/out'" "a Node under the brew prefix that brew didn't install (Intel's /usr/local) isn't Homebrew's"
+  cleanup; PATH="$saved"
+}
+
 test_the_wizard_never_runs_a_node_manager() {
   local bad
   # Any line that would run one, rather than print it for the user.
