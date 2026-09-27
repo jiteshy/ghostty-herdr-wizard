@@ -75,8 +75,8 @@ choices_run() {
 
 test_choices_are_asked_once_and_saved() {
   new_home
-  # banner, plain text, projects folder, create it, my tab names (four of them), done
-  choices_run '' 2 "$H/repos" y 2 ai code srv diff ''
+  # banner, untick icons, accept, projects folder, create it, my tab names (four of them), done
+  choices_run '' 1 '' "$H/repos" y 2 ai code srv diff ''
   check "grep -qx 'GLYPHS=off' '$STATE/choices.env'" "icons answer saved"
   check "grep -qx 'PROJECTS_DIR=$H/repos' '$STATE/choices.env'" "projects folder saved"
   check "grep -qx 'TABS=ai,code,srv,diff' '$STATE/choices.env'" "tab names saved"
@@ -89,7 +89,7 @@ test_choices_are_asked_once_and_saved() {
 
 test_a_rerun_offers_last_times_answers() {
   new_home
-  choices_run '' 2 "$H/repos" y 1 ''
+  choices_run '' 1 '' "$H/repos" y 1 ''
   cp "$STATE/choices.env" "$T/first"
   choices_run '' y
   check "grep -q \"Last time's answers\" '$T/out'" "a re-run shows last time's answers"

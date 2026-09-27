@@ -52,7 +52,7 @@ bash ghostty-herdr-wizard.sh --revert              # undo every config change
 
 ## What the script does
 
-The script has 13 steps. Each step has a name, tells you what it will do, and waits for you.
+The script has up to 13 steps, one for each group of tools you pick. Each step has a name, tells you what it will do, and waits for you.
 
 The script does three types of work:
 
@@ -60,15 +60,15 @@ The script does three types of work:
 2. It writes config files. If a file exists and is different, the script shows you the changes and asks you first. It keeps a copy of the old file in `~/.ghostty-herdr-wizard/backups/`.
 3. It tells you what to do for the steps that need a person. Examples: approve a macOS permission, or sign in to GitHub.
 
-**`choices`.** All the questions come first: icons (installs the JetBrains Mono Nerd Font) or plain text, which works in any font, so nothing shows as boxes in a terminal without a Nerd Font; the folder with your repos; and the tabs that new workspaces open with. The answers are saved, and the next run offers to use them again.
+**`choices`.** All the questions come first. First, what to install: Ghostty, herdr and terminal-notifier always, then one checkbox per group of tools that need each other (Nerd Font + icons, starship prompt, project jumper + fuzzy find, shell typing help, editor, lazygit for review, file manager, GitHub, Claude Code status line). All are ticked to start with. A group you untick is not installed and its step is skipped. Unticking icons gives plain text, which works in any font, so nothing shows as boxes in a terminal without a Nerd Font. Then the folder with your repos (only with the project jumper), and the tabs that new workspaces open with. The answers are saved, and the next run offers to use them again.
 
-**`install`.** Install everything with Homebrew in one go: Ghostty, herdr and all the tools below. Tools you skip with `--skip` are not installed.
+**`install`.** Install everything with Homebrew in one go: Ghostty, herdr and the tools you picked. Tools of steps you skip with `--skip` are not installed.
 
 **`ghostty`, `herdr`, `macos`: the terminal and the agents.** Write the Ghostty config: the Catppuccin Mocha dark theme, Cmd keys that control herdr, and herdr in every new window. Make the Ctrl-Space key free for herdr, write its config, and connect Claude Code and Codex to it, so their conversations continue after a restart. Set up notifications and the quick terminal.
 
 **`prompt`, `shell`: the shell.** Set up the Starship prompt. Add history search, aliases for `bat`, `eza`, `fzf` and the other command-line tools, and a command that finds and opens your repos.
 
-**`editor`, `review`, `yazi`, `github`: code and git.** Neovim with LazyVim, `delta` and `difftastic` for clear diffs, `lazygit` to stage and commit, `yazi` to browse files, and the GitHub CLI with `gh-dash` for pull requests.
+**`editor`, `review`, `yazi`, `github`: code and git.** Neovim with LazyVim, `lazygit` to stage and commit, `yazi` to browse files, and the GitHub CLI with `gh-dash` for pull requests.
 
 **`statusline`.** Add the Claude Code status line.
 

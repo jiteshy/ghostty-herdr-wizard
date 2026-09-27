@@ -225,6 +225,37 @@ choice_set() {
 GLYPHS=$(choice_get GLYPHS || true)
 [[ "$GLYPHS" == off ]] || GLYPHS=on
 
+# The groups of tools the choices stage offers, each one checkbox: "key:title:
+# stage". Tools are grouped only where they need each other. A declined group
+# is neither installed nor configured, and a stage runs only when a group it
+# configures is selected. Ghostty, herdr and terminal-notifier are not here:
+# they are always installed. "icons" is the GLYPHS switch above.
+CLUSTERS=(
+  "icons:Nerd Font + icons:"
+  "prompt:starship prompt:prompt"
+  "jumper:project jumper + fuzzy find:shell"
+  "typing:shell typing help:shell"
+  "editor:editor:editor"
+  "review:review the agent's diff:review"
+  "files:file manager:yazi"
+  "github:GitHub:github"
+  "statusline:Claude Code status line:statusline"
+)
+RECOMMENDED_TOOLS="prompt,jumper,typing,editor,review,files,github,statusline"
+# The selected groups other than icons, as ",a,b," for matching. Saved as the
+# TOOLS choice; "none" means none of them.
+TOOLS=$(choice_get TOOLS || true)
+case "$TOOLS" in
+  none) TOOLS="" ;;
+  "") TOOLS="$RECOMMENDED_TOOLS" ;;
+esac
+TOOLS=",$TOOLS,"
+
+# selected KEY: true if the group KEY is selected.
+selected() {
+  if [[ "$1" == icons ]]; then [[ "$GLYPHS" == on ]]; else [[ "$TOOLS" == *",$1,"* ]]; fi
+}
+
 # Homebrew lives in /opt/homebrew on Apple silicon and /usr/local on Intel. Put it
 # on PATH for this run, so a terminal opened before installing brew still works.
 BREW_BIN="$(command -v brew 2>/dev/null || true)"
@@ -976,7 +1007,10 @@ git_global_value() {
   git config --global --get "$1" 2>/dev/null || printf '<absent>'
 }
 
-# git_set KEY VALUE: set a global git config value if it isn't already.
+# git_set KEY VALUE: set a global git config value if it isn't already. No
+# stage sets git config any more, but journals from earlier versions hold
+# GITKEY entries, and this is the writer --revert's handling of them is
+# tested against.
 # Journaled key by key like the JSON settings, since the user edits their git
 # config too:  <time>  GITKEY  ~/.gitconfig  <key>  <prior|<absent>>  <written>
 git_set() {
@@ -1297,29 +1331,94 @@ preflight() {
   fi
 }
 
-# ask_glyphs: the Nerd Font + icons question. Sets and saves GLYPHS; Enter keeps
-# the current answer (icons on a first run).
-ask_glyphs() {
-  local current=1 answer
-  [[ "$GLYPHS" == on ]] || current=2
-  say "${BOLD}Nerd Font + icons${RESET}"
-  note "File, folder and git icons in the prompt, ls, yazi, Neovim, lazygit, herdr's"
-  note "sidebar and the Claude Code status line. They need a Nerd Font in whichever"
-  note "terminal shows them, or you get boxes instead."
-  printf '\n'
-  say "1) icons  (suggested)"
-  note "   installs JetBrains Mono Nerd Font, or uses it if you have it"
-  say "2) plain text"
-  note "   no icons anywhere, works in any font (e.g. iTerm with a font you like)"
-  printf '\n'
-  printf '  %schoice [%s]:%s ' "$BOLD" "$current" "$RESET"
-  read -r answer || true
-  case "${answer:-$current}" in
-    2) GLYPHS=off ;;
-    *) GLYPHS=on ;;
+# cluster_tools KEY: what the group KEY brings, one "tool|what it gives you"
+# per line, as the selection screen lists it.
+cluster_tools() {
+  case "$1" in
+    icons) printf '%s\n' "Nerd Font|JetBrains Mono Nerd Font, unless you have it: file, folder and git" \
+      "|icons in the prompt, ls, yazi, Neovim, lazygit, herdr and the status line." \
+      "|Unticked: plain text that works in any font (e.g. iTerm), no font install" ;;
+    prompt) printf '%s\n' "starship|a prompt showing folder, git branch and runtime versions" ;;
+    jumper) printf '%s\n' "fzf|fuzzy search: Ctrl-R history, Ctrl-T files, and the project picker" \
+      "fd|fast file finder behind that search" \
+      "eza|ls with git status and a tree view" \
+      "bat|cat with syntax highlighting, and fzf's file preview" ;;
+    typing) printf '%s\n' "zsh-autosuggestions|suggests the rest of a command from your history" \
+      "zsh-syntax-highlighting|colours a command red before you run it if it's wrong" ;;
+    editor) printf '%s\n' "neovim|the editor, opened next to your agent" \
+      "LazyVim|a ready-made Neovim setup: file tree, search, git signs" \
+      "tree-sitter-cli|builds the syntax parsers LazyVim uses" \
+      "ripgrep|fast search inside files, for LazyVim's grep" \
+      "fd|fast file finder, for LazyVim's file picker" ;;
+    review) printf '%s\n' "lazygit|a git UI: stage single lines or hunks, commit, branch, rebase" ;;
+    files) printf '%s\n' "yazi|a file manager in the terminal, with previews" \
+      "poppler|lets yazi preview PDFs" \
+      "resvg|lets yazi preview SVG images" ;;
+    github) printf '%s\n' "gh|the GitHub CLI: sign in, clone, open PRs" \
+      "gh-dash|your PRs, review requests and issues in one screen" ;;
+    statusline) printf '%s\n' "status line|context used, cost and rate limits under Claude Code's prompt" ;;
   esac
+}
+
+# show_clusters: the selection screen's numbered checkboxes.
+show_clusters() {
+  local entry key i=0 tool what box
+  for entry in "${CLUSTERS[@]}"; do
+    i=$((i + 1))
+    key=${entry%%:*}
+    if selected "$key"; then box="[x]"; else box="[ ]"; fi
+    entry=${entry#*:}
+    say "$i $box ${entry%%:*}"
+    while IFS='|' read -r tool what; do
+      printf '        %-24s %s\n' "$tool" "$what"
+    done < <(cluster_tools "$key")
+  done
+}
+
+# toggle_cluster N: tick or untick the Nth group on the screen.
+toggle_cluster() {
+  local entry key
+  [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= ${#CLUSTERS[@]} )) || return 0
+  entry=${CLUSTERS[$(($1 - 1))]}
+  key=${entry%%:*}
+  if [[ "$key" == icons ]]; then
+    if [[ "$GLYPHS" == on ]]; then GLYPHS=off; else GLYPHS=on; fi
+  elif selected "$key"; then
+    TOOLS=${TOOLS/,$key,/,}
+  else
+    TOOLS="$TOOLS$key,"
+  fi
+}
+
+# ask_tools: the selection screen. Numbers tick and untick groups, Enter
+# accepts. Sets and saves GLYPHS and TOOLS; it starts from the current answer
+# (everything on a first run).
+ask_tools() {
+  local answer n entry key picked=""
+  while :; do
+    say "${BOLD}What to install${RESET}"
+    note "Ghostty, herdr and terminal-notifier are always installed. Everything"
+    note "else is up to you: an unticked group is neither installed nor set up."
+    printf '\n'
+    show_clusters
+    printf '\n'
+    printf '  %sNumbers to tick or untick (e.g. 7 8), Enter when done:%s ' "$BOLD" "$RESET"
+    answer=""
+    read -r answer || true
+    [[ -n "$answer" ]] || break
+    for n in $answer; do toggle_cluster "$n"; done
+    printf '\n'
+  done
+  # Save in the screen's order, whatever order they were ticked in.
+  for entry in "${CLUSTERS[@]}"; do
+    key=${entry%%:*}
+    [[ "$key" != icons ]] && selected "$key" && picked+="$key,"
+  done
+  TOOLS=",$picked"
+  picked=${picked%,}
   choice_set GLYPHS "$GLYPHS"
-  ok "icons: $GLYPHS"
+  choice_set TOOLS "${picked:-none}"
+  ok "icons: $GLYPHS · tools: ${picked:-none beyond Ghostty and herdr}"
   printf '\n'
 }
 
@@ -1348,13 +1447,17 @@ ask_projects_dir() {
 
 # choices_saved: true once every question in the choices stage has an answer.
 choices_saved() {
-  choice_get GLYPHS >/dev/null && choice_get PROJECTS_DIR >/dev/null && choice_get TABS >/dev/null
+  choice_get GLYPHS >/dev/null && choice_get TOOLS >/dev/null && choice_get TABS >/dev/null &&
+    { ! selected jumper || choice_get PROJECTS_DIR >/dev/null; }
 }
 
 # show_choices: last run's answers, one per line.
 show_choices() {
+  local tools=${TOOLS#,}
+  tools=${tools%,}
   note "  icons            $GLYPHS"
-  note "  projects folder  $(current_projects_dir)"
+  note "  tools            ${tools:-none beyond Ghostty and herdr}"
+  selected jumper && note "  projects folder  $(current_projects_dir)"
   note "  default tabs     ${DEFAULT_TABS:-none, one plain tab}"
 }
 
@@ -1373,28 +1476,44 @@ stage_choices() {
     fi
     printf '\n'
   fi
-  ask_glyphs
-  ask_projects_dir
+  ask_tools
+  if selected jumper; then ask_projects_dir; fi
   ask_default_tabs
   pause
 }
 
-# stage_formulae SLUG: the Homebrew formulae the stage SLUG configures.
-stage_formulae() {
+# cluster_formulae KEY: the Homebrew formulae the group KEY brings. The Nerd
+# Font is a cask, so the install stage handles icons itself.
+cluster_formulae() {
   case "$1" in
-    herdr) echo herdr terminal-notifier ;;
     prompt) echo starship ;;
-    shell) echo bat eza fd ripgrep fzf zoxide glow jless btop tlrc zsh-autosuggestions zsh-syntax-highlighting ;;
+    jumper) echo fzf fd eza bat ;;
+    typing) echo zsh-autosuggestions zsh-syntax-highlighting ;;
     editor) echo neovim tree-sitter-cli ripgrep fd ;;
-    review) echo git-delta difftastic lazygit ;;
-    yazi) echo yazi poppler resvg ;;
+    review) echo lazygit ;;
+    files) echo yazi poppler resvg ;;
     github) echo gh ;;
     statusline) echo jq ;;
   esac
 }
 
+# stage_formulae SLUG: the Homebrew formulae the stage SLUG configures: the
+# mandatory ones for herdr, else those of every selected group it configures.
+stage_formulae() {
+  local entry key
+  if [[ "$1" == herdr ]]; then
+    echo herdr terminal-notifier
+    return 0
+  fi
+  for entry in "${CLUSTERS[@]}"; do
+    key=${entry%%:*}
+    [[ "${entry##*:}" == "$1" ]] && selected "$key" && cluster_formulae "$key"
+  done
+  return 0
+}
+
 # install_formulae: every formula the install stage brews, once each: those of
-# every stage except the ones --skip names. --only and --from don't narrow it,
+# every stage (so of every selected group) except the ones --skip names. --only and --from don't narrow it,
 # so --only install installs everything.
 install_formulae() {
   local entry slug f seen=" "
@@ -1418,7 +1537,7 @@ stage_tools() {
 
 # bat_themes: the Catppuccin themes BAT_THEME points at, unless already there.
 bat_themes() {
-  command -v bat >/dev/null 2>&1 || return 0
+  selected jumper && command -v bat >/dev/null 2>&1 || return 0
   local dir flavour fetched=false
   dir="$(bat --config-dir)/themes"
   mkdir -p "$dir"
@@ -1572,9 +1691,10 @@ eza_icons() {
   if [[ "$GLYPHS" == on ]]; then cat; else sed -E 's/ --icons=[a-z]+//g'; fi
 }
 
-# zshrc_block: the wizard's block in ~/.zshrc.
+# zshrc_block: the wizard's block in ~/.zshrc, with lines only for the
+# selected tools.
 zshrc_block() {
-  eza_icons <<'EOF'
+  cat <<'EOF'
 # Ghostty shell integration for plain shells. Ghostty starts windows through
 # ghostty-launch, so it can't inject this itself. Skipped inside herdr panes.
 if [[ -n "${GHOSTTY_RESOURCES_DIR:-}" && -z "${HERDR_ENV:-}" ]]; then
@@ -1583,9 +1703,13 @@ fi
 
 HISTFILE=~/.zsh_history HISTSIZE=50000 SAVEHIST=50000
 setopt share_history hist_ignore_all_dups
+EOF
+  if selected prompt; then
+    printf '\n%s\n' "(( \$+commands[starship] )) && eval \"\$(starship init zsh)\""
+  fi
+  if selected jumper; then
+    eza_icons <<'EOF'
 
-(( $+commands[starship] )) && eval "$(starship init zsh)"
-(( $+commands[zoxide] )) && eval "$(zoxide init zsh)"
 if (( $+commands[fzf] )); then
   source <(fzf --zsh)   # Ctrl-R history, Ctrl-T files, Alt-C cd
   export FZF_DEFAULT_COMMAND='fd --hidden --exclude .git'
@@ -1602,14 +1726,19 @@ if [[ -z "${CLAUDECODE:-}" ]]; then
   alias lt='eza --tree --level=2 --icons=auto --git-ignore'
   alias cat='bat --paging=never'
 fi
-alias v='nvim'
-alias lg='lazygit'
-alias gd='git diff'
-alias gds='DELTA_FEATURES=+side-by-side git diff'
-alias keys='glow -p ~/.config/ghostty-herdr-cheatsheet.md'
+alias keys='bat --paging=always --style=plain ~/.config/ghostty-herdr-cheatsheet.md'
 
 # p: fuzzy-jump into a project directory
 p() { local d; d=$(hproj --print) && [[ -n "$d" ]] && cd "$d"; }
+EOF
+  else
+    printf '\n%s\n' "alias keys='less ~/.config/ghostty-herdr-cheatsheet.md'"
+  fi
+  selected editor && printf '%s\n' "alias v='nvim'"
+  selected review && printf '%s\n' "alias lg='lazygit'"
+  printf '%s\n' "alias gd='git diff'"
+  if selected files; then
+    cat <<'EOF'
 
 # y: browse files with yazi; the shell follows you into the last directory
 y() {
@@ -1620,6 +1749,10 @@ y() {
   [[ -n "$cwd" && "$cwd" != "$PWD" ]] && builtin cd -- "$cwd"
   rm -f -- "$tmp"
 }
+EOF
+  fi
+  if selected typing; then
+    cat <<'EOF'
 
 _brew="${HOMEBREW_PREFIX:-/opt/homebrew}/share"
 [[ -r $_brew/zsh-autosuggestions/zsh-autosuggestions.zsh ]] && source $_brew/zsh-autosuggestions/zsh-autosuggestions.zsh
@@ -1627,6 +1760,8 @@ _brew="${HOMEBREW_PREFIX:-/opt/homebrew}/share"
 [[ -r $_brew/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]] && source $_brew/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
 unset _brew
 EOF
+  fi
+  return 0
 }
 
 # hproj_script: the project picker behind `p` and herdr's prefix m.
@@ -1655,73 +1790,60 @@ fi
 EOF
 }
 
+# zprofile_block PROJECTS_LINE: the wizard's block in ~/.zprofile, with lines only for
+# the selected tools. PROJECTS_LINE is the projects folder as it should be written.
+zprofile_block() {
+  printf '%s\n' 'export PATH="$HOME/.local/bin:$PATH"'
+  selected editor && printf '%s\n' 'export EDITOR=nvim VISUAL=nvim'
+  if selected jumper; then
+    printf 'export PROJECTS_DIR="%s"\n' "$1"
+    printf '%s\n' 'export BAT_THEME="Catppuccin Mocha"'
+  fi
+  return 0
+}
+
 stage_shell() {
-  say "bat (cat with syntax), eza (ls with git status), fd + ripgrep (find/grep), fzf (fuzzy"
-  say "finder), zoxide (jump dirs), glow (markdown), jless (JSON viewer), btop (processes),"
-  say "tlrc (tldr examples), zsh autosuggestions + syntax highlighting."
+  if selected jumper; then
+    say "Project jumper: p (and herdr prefix m) fuzzy-finds a repo. fzf adds Ctrl-R history,"
+    say "Ctrl-T files and Alt-C cd; eza is ls with git status; bat is cat with syntax colours."
+  fi
+  if selected typing; then
+    say "Typing help: suggestions from your history, and commands coloured as you type."
+  fi
   say "Adds a marked block to ~/.zprofile and ~/.zshrc. Your existing lines stay as they are."
-  note "Aliases like ls→eza and cat→bat are skipped inside Claude Code's shell, so agents"
-  note "get the real commands and their flags."
+  if selected jumper; then
+    note "Aliases like ls→eza and cat→bat are skipped inside Claude Code's shell, so agents"
+    note "get the real commands and their flags."
+  fi
   printf '\n'
   stage_tools shell
   bat_themes
-  local projects projects_line
-  projects=$(current_projects_dir)
-  if [[ -d "$projects" ]]; then
-    ok "projects folder: $projects"
-  else
-    warn "p and prefix m will find nothing until $projects exists (change it: --only choices,shell)"
+  local projects
+  local projects_line=""
+  if selected jumper; then
+    projects=$(current_projects_dir)
+    if [[ -d "$projects" ]]; then
+      ok "projects folder: $projects"
+    else
+      warn "p and prefix m will find nothing until $projects exists (change it: --only choices,shell)"
+    fi
+    if [[ "$projects" == "$HOME"/* ]]; then
+      projects_line="\$HOME${projects#"$HOME"}"
+    else
+      projects_line="$projects"
+    fi
+    export PROJECTS_DIR="$projects"
   fi
-  if [[ "$projects" == "$HOME"/* ]]; then
-    projects_line="\$HOME${projects#"$HOME"}"
-  else
-    projects_line="$projects"
-  fi
-  export PROJECTS_DIR="$projects"
   printf '\n'
-  upsert_block "$HOME/.zprofile" < <(
-    cat <<'EOF'
-export PATH="$HOME/.local/bin:$PATH"
-export EDITOR=nvim VISUAL=nvim
-EOF
-    printf 'export PROJECTS_DIR="%s"\n' "$projects_line"
-    cat <<'EOF'
-export BAT_THEME="Catppuccin Mocha"
-EOF
-  )
+  upsert_block "$HOME/.zprofile" < <(zprofile_block "$projects_line")
   upsert_block "$HOME/.zshrc" < <(zshrc_block)
-  install_file "$HOME/.local/bin/hproj" < <(hproj_script)
-  chmod +x "$HOME/.local/bin/hproj"
+  if selected jumper; then
+    install_file "$HOME/.local/bin/hproj" < <(hproj_script)
+    chmod +x "$HOME/.local/bin/hproj"
+  fi
   install_file "$CHEATSHEET" < <(cheatsheet)
   note "New shells pick this up. This wizard's own shell doesn't need it."
   pause
-}
-
-# git_diff_settings: delta and difftastic as git's diff tools, if the user agrees.
-git_diff_settings() {
-  say "These global git settings will be applied:"
-  note "core.pager=delta  interactive.diffFilter='delta --color-only'"
-  note "delta.navigate=true  delta.line-numbers=true"
-  note "merge.conflictStyle=zdiff3  diff.colorMoved=default  diff.algorithm=histogram"
-  note "alias.dft / alias.dlog / alias.dshow (difftastic)"
-  note "init.defaultBranch=main  push.autoSetupRemote=true"
-  if confirm "Apply them? (~/.gitconfig is backed up first)"; then
-    backup "$HOME/.gitconfig"
-    git_set core.pager delta
-    git_set interactive.diffFilter "delta --color-only"
-    git_set delta.navigate true
-    git_set delta.line-numbers true
-    git_set merge.conflictStyle zdiff3
-    git_set diff.colorMoved default
-    git_set diff.algorithm histogram
-    git_set alias.dft "-c diff.external=difft diff"
-    git_set alias.dlog "-c diff.external=difft log -p --ext-diff"
-    git_set alias.dshow "-c diff.external=difft show --ext-diff"
-    git_set init.defaultBranch main
-    git_set push.autoSetupRemote true
-  else
-    SKIPPED+=("git delta/difftastic settings not applied")
-  fi
 }
 
 # lazygit_config: lazygit's config.yml. Nerd Font icons only with the glyph
@@ -1739,28 +1861,15 @@ EOF
     printf '  nerdFontsVersion: ""\n'
   fi
   cat <<'EOF'
-git:
-  # press | to cycle between these
-  diffRenderers:
-    - type: stdinFilter
-      name: delta
-      command: delta --paging=never
-    - type: extDiff
-      name: difftastic
-      command: difft --color=always
 os:
   editPreset: nvim
 EOF
 }
 
 stage_review() {
-  say "delta: every git diff/log/show gets syntax highlighting, line numbers, n/N to jump files."
-  say "difftastic: structural diffs that ignore formatting noise (git dft, git dlog)."
   say "lazygit: a full git UI. Stage single lines or hunks, commit, rebase, resolve conflicts."
-  note "lazygit renders diffs through delta; press | inside lazygit to switch to difftastic."
+  note "Opens with herdr prefix then d, or lg in any shell."
   stage_tools review
-  printf '\n'
-  git_diff_settings
   printf '\n'
   local lg_dir
   if lg_dir=$(lazygit --print-config-dir 2>/dev/null) && [[ -n "$lg_dir" ]]; then
@@ -2302,6 +2411,14 @@ TAIL
 
 # herdr_config: the full herdr config. The sidebar's agent indicators follow
 # the glyph switch.
+# herdr_popup KEY COMMAND DESCRIPTION SIZE: one popup keybinding for herdr's
+# config, a SIZE-sized window running COMMAND in a login shell.
+herdr_popup() {
+  printf '[[keys.command]]\nkey = "%s"\ntype = "popup"\n' "$1"
+  printf "command = \"zsh -lc 'exec %s'\"\n" "$2"
+  printf 'description = "%s"\nwidth = "%s"\nheight = "%s"\n\n' "$3" "$4" "$4"
+}
+
 herdr_config() {
   cat <<'EOF'
 # herdr config, written by ghostty-herdr-wizard.sh
@@ -2334,46 +2451,13 @@ open_notification_target = "prefix+o"
 open_worktree = "prefix+shift+o"
 remove_worktree = "prefix+shift+k"
 
-[[keys.command]]
-key = "prefix+m"
-type = "popup"
-command = "zsh -lc 'exec hproj'"
-description = "open a project as a workspace"
-width = "70%"
-height = "70%"
-
-[[keys.command]]
-key = "prefix+d"
-type = "popup"
-command = "zsh -lc 'exec lazygit'"
-description = "lazygit"
-width = "92%"
-height = "92%"
-
-[[keys.command]]
-key = "prefix+f"
-type = "popup"
-command = "zsh -lc 'exec yazi'"
-description = "yazi file manager"
-width = "92%"
-height = "92%"
-
-[[keys.command]]
-key = "prefix+i"
-type = "popup"
-command = "zsh -lc 'exec gh dash'"
-description = "GitHub PRs and issues"
-width = "92%"
-height = "92%"
-
-[[keys.command]]
-key = "prefix+t"
-type = "popup"
-command = "zsh -lc 'exec btop'"
-description = "btop"
-width = "85%"
-height = "85%"
-
+EOF
+  # Popups only for selected tools, so no key opens nothing.
+  selected jumper && herdr_popup prefix+m hproj "open a project as a workspace" 70%
+  selected review && herdr_popup prefix+d lazygit lazygit 92%
+  selected files && herdr_popup prefix+f yazi "yazi file manager" 92%
+  selected github && herdr_popup prefix+i "gh dash" "GitHub PRs and issues" 92%
+  cat <<'EOF'
 [ui]
 EOF
   # "symbols" needs a Nerd Font; "dots" is herdr's own glyph-free default.
@@ -2551,7 +2635,7 @@ stage_statusline() {
     pause
     return 0
   fi
-  say "Optional: a two-line status bar under the prompt in every Claude Code session."
+  say "A two-line status bar under the prompt in every Claude Code session."
   say "Preview with sample data:"
   printf '\n'
   local preview sample
@@ -2567,13 +2651,7 @@ stage_statusline() {
   note "Percentages go yellow at 50% and red at 80%. A worktree segment appears inside git worktrees."
   note "Claude Code doesn't report a running token total, so tokens shown are what's in context now."
   printf '\n'
-  if statusline_configured; then
-    ok "already set up in ~/.claude/settings.json"
-  elif ! confirm "Set up this status line?"; then
-    note "Skipped. Add it later with: bash $SCRIPT_PATH --only statusline"
-    pause
-    return 0
-  fi
+  statusline_configured && ok "already set up in ~/.claude/settings.json"
   stage_tools statusline
   install_file "$STATUSLINE" < <(statusline_script)
   chmod +x "$STATUSLINE"
@@ -2649,7 +2727,7 @@ tour_navigation() {
   note "  Pane       Cmd-D right · Cmd-Shift-D down · prefix h j k l move · prefix z zoom · prefix x close"
   note "  Agent      prefix a / A next/previous agent · prefix o latest notification"
   note "  Anything   prefix g (Cmd-P) goto picker · prefix Space back to the last pane"
-  note "  Popups     prefix d lazygit · f yazi · i GitHub PRs · t btop   (q closes)"
+  note "  Popups     prefix d lazygit · f yazi · i GitHub PRs   (q closes)"
   note "  Mouse      click sidebar rows, tabs and panes; drag borders to resize"
   note "  Stuck?     prefix ? lists every key · run 'keys' for the cheat sheet"
   printf '\n'
@@ -2743,10 +2821,9 @@ tour_review() {
   step "In nvim: Space Space, open README.md. It updates on its own; the gutter marks the change."
   printf '\n'
   say "Pick a review style:"
-  step "Terminal: in any pane run  gd  (inline, n jumps files) or  gds  (side by side). q quits."
-  step "Structural: git dft ignores formatting noise and shows what actually changed."
+  step "Terminal: in any pane run  gd  for the plain git diff. q quits."
   step "Neovim: Space g v. Changed files left, before/after right. Space g V closes."
-  step "lazygit: prefix d. Enter on the file, space stages a line or hunk, | swaps delta and difftastic."
+  step "lazygit: prefix d. Enter on the file, space stages a line or hunk."
   printf '\n'
   step "Clean up: in lazygit select README.md and press d to discard the change."
   note "Habit: review every agent change like this before you commit, and commit in small steps."
@@ -2756,7 +2833,7 @@ tour_review() {
 tour_statusline() {
   if ! statusline_configured; then
     note "No status line set up, so there's nothing to show here."
-    note "Add it any time: bash $SCRIPT_PATH --only statusline"
+    note "Add it any time: bash $SCRIPT_PATH --only choices,statusline"
     pause "Press Enter for step 8 of 9"
     return 0
   fi
@@ -2801,7 +2878,7 @@ tour_habits() {
   note "• Parallel work on one repo: one worktree per agent (prefix Shift-G). Merge via lazygit or a PR."
   note "• Let agents own their terminals: ask Claude to run the dev server or tests in a herdr pane."
   note "• Don't watch agents work. Notifications and prefix a bring you back when one needs you."
-  note "• Review before every commit (Space g v or gds). Small commits make agent work easy to undo."
+  note "• Review before every commit (Space g v or lazygit). Small commits make agent work easy to undo."
   note "• Name sessions with /rename so claude --resume is readable. /clear between unrelated tasks."
   note "• Watch the status line: /compact before context goes red; mind the 5h and week limits."
   note "• One-off command? Ctrl-\` from any app gives a plain shell without touching your layout."
@@ -2874,7 +2951,6 @@ re-running the wizard with `--only choices,herdr`, or edit
 | prefix `d` · Cmd-Shift-G | lazygit |
 | prefix `f` · Cmd-E | yazi |
 | prefix `i` | gh dash (PRs, issues) |
-| prefix `t` | btop |
 
 ## Claude Code
 
@@ -2892,22 +2968,14 @@ re-running the wizard with `--only choices,herdr`, or edit
 |---|---|
 | `p` | fuzzy-jump into a project |
 | `y` | yazi; shell follows you to where you quit |
-| `z <dir>` | jump to a frequent directory |
 | Ctrl-R / Ctrl-T / Alt-C | fuzzy history / insert file / cd |
 | `ll`, `lt` | list with git status / tree |
 | `v`, `lg` | nvim / lazygit |
-| `gd`, `gds` | git diff / side by side |
-| `git dft`, `git dlog` | structural diff / log with difftastic |
-| `jless file.json` | fold and explore JSON |
-| `tldr <cmd>` | quick examples |
-
-## Diffs (delta)
-
-`n` / `N` next / previous file · `q` quit
+| `gd` | git diff |
 
 ## lazygit
 
-`space` stage · `enter` on a file to stage single lines · `c` commit · `P` push · `p` pull · `d` discard · `|` delta ↔ difftastic · `?` help
+`space` stage · `enter` on a file to stage single lines · `c` commit · `P` push · `p` pull · `d` discard · `?` help
 
 ## Neovim (LazyVim)
 
@@ -2934,13 +3002,34 @@ STAGES=(
   "prompt:Starship prompt"
   "shell:Shell: tools, history search, aliases, project jumper"
   "editor:Neovim + LazyVim"
-  "review:Reviewing diffs: delta, difftastic and lazygit"
+  "review:Reviewing diffs: lazygit"
   "yazi:yazi file manager"
   "github:GitHub CLI and gh-dash"
-  "statusline:Claude Code status line (optional)"
+  "statusline:Claude Code status line"
   "tour:Guided tour"
 )
-TOTAL_STAGES=${#STAGES[@]}
+
+# stage_selected NAME: true if the choices allow the stage NAME: the fixed
+# stages always, a group's stage only while one of its groups is selected.
+stage_selected() {
+  local entry configures=false
+  for entry in "${CLUSTERS[@]}"; do
+    [[ "${entry##*:}" == "$1" ]] || continue
+    configures=true
+    selected "${entry%%:*}" && return 0
+  done
+  ! $configures
+}
+
+# selected_stage_count: how many stages the choices allow, for "Stage 3/9".
+selected_stage_count() {
+  local entry n=0
+  for entry in "${STAGES[@]}"; do
+    stage_selected "${entry%%:*}" && n=$((n + 1))
+  done
+  echo "$n"
+}
+TOTAL_STAGES=$(selected_stage_count)
 
 usage() {
   cat <<EOF
@@ -3063,12 +3152,21 @@ banner "Ghostty + herdr terminal for coding agents"
 # Every stage writes through the journaling helpers, so --revert can undo it.
 JOURNALING=1
 for entry in "${STAGES[@]}"; do
+  if ! stage_selected "${entry%%:*}"; then
+    # Named on purpose but declined in the choices: say so rather than nothing.
+    if [[ "$ONLY" == *",${entry%%:*},"* ]]; then
+      note "${entry%%:*}: not selected in your choices, so skipped (change them: --only choices)"
+    fi
+    continue
+  fi
   if ! stage_wanted "${entry%%:*}"; then
     _STAGE_INDEX=$((_STAGE_INDEX + 1))
     continue
   fi
   stage "${entry#*:}"
   "stage_${entry%%:*}"
+  # New answers can add or drop stages.
+  [[ "${entry%%:*}" == choices ]] && TOTAL_STAGES=$(selected_stage_count)
 done
 JOURNALING=0
 
