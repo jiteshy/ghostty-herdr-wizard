@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- New "Nerd Font + icons" choice in stage 2, saved in `~/.ghostty-herdr-wizard/choices.env` so later runs and `--only` reuse it. Icons (the default) keeps today's setup. Plain text skips the Nerd Font and makes every consumer glyph-free: herdr's sidebar uses `dots`, eza drops `--icons` (aliases and the `p` / prefix m preview), starship uses its `plain-text-symbols` preset, yazi replaces every glyph in its default theme (icons, separators, notification and completion icons), Neovim uses ASCII file icons, letters for LazyVim's diagnostics and git signs, no completion-kind icons and plain lualine separators, lazygit turns off Nerd Font icons, the Claude Code status line drops its icons, and Ghostty keeps its built-in font. Re-run the wizard after changing it to rewrite those configs
+- Tests: `bash tests/glyphs_test.sh`
 - `--revert` undoes every config change the wizard made, in every stage. Installed tools stay (removing them is a later `--uninstall`)
   - Replaced files come back byte for byte. Files and folders the wizard created are moved to `~/.ghostty-herdr-wizard/reverted/<time>/`, never deleted, including a LazyVim `~/.config/nvim` you have since filled with your own plugins
   - A file you changed after the wizard wrote it is shown as a diff and only reverted if you say so. By default your version is kept, and the closing summary lists it
