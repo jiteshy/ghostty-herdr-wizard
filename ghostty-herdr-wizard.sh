@@ -221,7 +221,7 @@ choice_set() {
 
 # The Nerd Font switch: "on" puts file, folder and git icons everywhere; "off"
 # gives every tool a plain-text look that works in any font. Asked in the
-# Ghostty install stage, then followed by every config that could show a glyph.
+# choices stage, then followed by every config that could show a glyph.
 GLYPHS=$(choice_get GLYPHS || true)
 [[ "$GLYPHS" == off ]] || GLYPHS=on
 
@@ -297,11 +297,14 @@ current_projects_dir() {
 in_ghostty() { [[ "${TERM_PROGRAM:-}" == "ghostty" || -n "${HERDR_ENV:-}" ]]; }
 
 # brew_formulae NAME...: install only the formulae not already present.
+# With --quiet first, say nothing when they are all there.
 brew_formulae() {
-  local missing
+  local missing quiet=false
+  if [[ "${1:-}" == --quiet ]]; then quiet=true; shift; fi
+  (( $# )) || return 0
   missing=$(missing_formulae "$@")
   if [[ -z "$missing" ]]; then
-    ok "already installed: $*"
+    $quiet || ok "already installed: $*"
   else
     # shellcheck disable=SC2086 # one formula per word
     run brew install $missing
@@ -1335,7 +1338,6 @@ ask_projects_dir() {
       warn "p and prefix m will find nothing until $projects exists"
     fi
   fi
-  PROJECTS_DIR="$projects"
   choice_set PROJECTS_DIR "$projects"
   printf '\n'
 }
@@ -1355,6 +1357,8 @@ show_choices() {
 stage_choices() {
   say "Every question up front. The stages after this run from your answers, which"
   say "are saved in $CHOICES for re-runs and --only."
+  say "Every later file change shows a diff first and keeps a backup in:"
+  note "$BACKUP_DIR"
   printf '\n'
   if choices_saved; then
     say "Last time's answers:"
@@ -1368,7 +1372,6 @@ stage_choices() {
   ask_glyphs
   ask_projects_dir
   ask_default_tabs
-  choice_set TABS "$DEFAULT_TABS"
   pause
 }
 
@@ -1387,7 +1390,8 @@ stage_formulae() {
 }
 
 # install_formulae: every formula the install stage brews, once each: those of
-# every stage this run doesn't skip.
+# every stage except the ones --skip names. --only and --from don't narrow it,
+# so --only install installs everything.
 install_formulae() {
   local entry slug f seen=" "
   for entry in "${STAGES[@]}"; do
@@ -1404,11 +1408,27 @@ install_formulae() {
 # stage_tools NAME: install whatever the stage NAME needs that isn't there yet,
 # for a stage run on its own (--only). Silent when the install stage did it.
 stage_tools() {
-  local missing
-  # shellcheck disable=SC2046,SC2086 # one formula per word
-  missing=$(missing_formulae $(stage_formulae "$1"))
-  # shellcheck disable=SC2086
-  [[ -z "$missing" ]] || run brew install $missing
+  # shellcheck disable=SC2046 # one formula per word
+  brew_formulae --quiet $(stage_formulae "$1")
+}
+
+# bat_themes: the Catppuccin themes BAT_THEME points at, unless already there.
+bat_themes() {
+  command -v bat >/dev/null 2>&1 || return 0
+  local dir flavour fetched=false
+  dir="$(bat --config-dir)/themes"
+  mkdir -p "$dir"
+  for flavour in Mocha Latte; do
+    [[ -f "$dir/Catppuccin $flavour.tmTheme" ]] && continue
+    run curl -fsSL -o "$dir/Catppuccin $flavour.tmTheme" \
+      "https://raw.githubusercontent.com/catppuccin/bat/main/themes/Catppuccin%20$flavour.tmTheme"
+    fetched=true
+  done
+  if $fetched; then
+    run bat cache --build
+  else
+    ok "Catppuccin themes for bat present"
+  fi
 }
 
 stage_install() {
@@ -1436,21 +1456,7 @@ stage_install() {
   fi
   # shellcheck disable=SC2046 # one formula per word
   brew_formulae $(install_formulae)
-  if command -v bat >/dev/null 2>&1; then
-    say "Catppuccin themes for bat (delta reuses them):"
-    local bat_themes flavour
-    bat_themes="$(bat --config-dir)/themes"
-    mkdir -p "$bat_themes"
-    for flavour in Mocha Latte; do
-      if [[ -f "$bat_themes/Catppuccin $flavour.tmTheme" ]]; then
-        ok "bat theme Catppuccin $flavour present"
-      else
-        run curl -fsSL -o "$bat_themes/Catppuccin $flavour.tmTheme" \
-          "https://raw.githubusercontent.com/catppuccin/bat/main/themes/Catppuccin%20$flavour.tmTheme"
-      fi
-    done
-    run bat cache --build
-  fi
+  bat_themes
   pause
 }
 
@@ -1654,9 +1660,14 @@ stage_shell() {
   note "get the real commands and their flags."
   printf '\n'
   stage_tools shell
+  bat_themes
   local projects projects_line
   projects=$(current_projects_dir)
-  ok "projects folder: $projects"
+  if [[ -d "$projects" ]]; then
+    ok "projects folder: $projects"
+  else
+    warn "p and prefix m will find nothing until $projects exists (change it: --only choices,shell)"
+  fi
   if [[ "$projects" == "$HOME"/* ]]; then
     projects_line="\$HOME${projects#"$HOME"}"
   else
@@ -2013,8 +2024,14 @@ stage_yazi() {
 }
 
 # ask_default_tabs: decide which tabs new workspaces and worktrees open with.
-# Sets DEFAULT_TABS to a comma-separated list, or empty to turn the plugin off.
+# Sets and saves DEFAULT_TABS: a comma-separated list, or empty to turn the
+# plugin off.
 ask_default_tabs() {
+  pick_default_tabs
+  choice_set TABS "$DEFAULT_TABS"
+}
+
+pick_default_tabs() {
   if ! confirm "Open a default set of tabs on every new workspace and worktree?"; then
     DEFAULT_TABS=""
     return 0
@@ -2348,6 +2365,7 @@ stage_herdr() {
   fi
   printf '\n'
   say "Default tab layout plugin..."
+  note "tabs: ${DEFAULT_TABS:-none} (change them with --only choices,herdr)"
   if [[ -n "$DEFAULT_TABS" ]]; then
     write_worktree_tabs_plugin
   else
@@ -2530,9 +2548,12 @@ stage_tour() {
   local entry i=0
   for entry in "${TOUR[@]}"; do
     i=$((i + 1))
-    _clear
-    printf '\n%s%s▸ Stage %s/%s · Tour %s/%s · %s%s\n' \
-      "$BOLD" "$BLUE" "$_STAGE_INDEX" "$TOTAL_STAGES" "$i" "${#TOUR[@]}" "${entry#*:}" "$RESET"
+    # The first screen sits under the stage header; each later one gets its own.
+    if (( i > 1 )); then
+      _clear
+      printf '\n%s%s▸ Stage %s/%s · %s%s\n' "$BOLD" "$BLUE" "$_STAGE_INDEX" "$TOTAL_STAGES" "Guided tour" "$RESET"
+    fi
+    printf '%s  Tour %s/%s · %s%s\n\n' "$BOLD" "$i" "${#TOUR[@]}" "${entry#*:}" "$RESET"
     "${entry%%:*}"
   done
 }
@@ -2960,10 +2981,8 @@ fi
 case "$MODE" in
   help) usage; exit 0 ;;
   list)
-    i=0
     for entry in "${STAGES[@]}"; do
-      i=$((i + 1))
-      printf '%3d  %-11s %s\n' "$i" "${entry%%:*}" "${entry#*:}"
+      printf '  %-11s %s\n' "${entry%%:*}" "${entry#*:}"
     done
     exit 0
     ;;

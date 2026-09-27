@@ -13,7 +13,7 @@ test_list_prints_the_stage_names_in_order() {
   new_home
   cli --list
   local names
-  names=$(awk '{print $2}' "$T/out" | tr '\n' ' ')
+  names=$(awk '{print $1}' "$T/out" | tr '\n' ' ')
   check "[[ '$names' == 'choices install ghostty herdr macos prompt shell editor review yazi github statusline tour ' ]]" \
     "--list prints the 13 stage names in order (got '$names')"
   cleanup
@@ -106,6 +106,24 @@ test_a_rerun_offers_last_times_answers() {
   choices_run '' n '' '' y y ''
   check "grep -qx 'TABS=agents,code,dev server,git review' '$STATE/choices.env'" \
     "after no tabs, yes offers the standard set again"
+  cleanup
+}
+
+# --only shell with a projects folder that isn't there (never chosen, or
+# deleted since) says so rather than pointing p at nothing in silence.
+test_shell_warns_when_the_projects_folder_is_missing() {
+  new_home
+  mkdir -p "$STATE"
+  printf 'PROJECTS_DIR=%s\n' "$H/gone" > "$STATE/choices.env"
+  ( # subshell: the fake brew and bat on PATH never outlive this test
+    fake_brew
+    fake_bat
+    cli --only shell
+    check "grep -q 'find nothing until $H/gone exists' '$T/out'" "the shell stage warns about the missing folder"
+    check "grep -q 'PROJECTS_DIR=\"\$HOME/gone\"' '$H/.zprofile'" "and still writes the chosen folder"
+    printf '%s %s\n' "$PASSES" "$FAILS" > "$T/tally"
+  )
+  read -r PASSES FAILS < "$T/tally"
   cleanup
 }
 

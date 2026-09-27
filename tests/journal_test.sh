@@ -637,8 +637,9 @@ test_shell_stage_end_to_end() {
   new_home
   printf '# mine\nalias gs="git status"\n' > "$H/.zshrc"
   cp "$H/.zshrc" "$T/original"
-  ( # subshell: the fake brew on PATH never outlives this test
+  ( # subshell: the fake brew and bat on PATH never outlive this test
     fake_brew
+    fake_bat
     cli --only shell
     check "grep -q \"BLOCK	$H/.zshrc\" '$STATE/journal.tsv'" "shell stage journals its .zshrc block"
     check "grep -q \"CREATE	$H/.local/bin/hproj\" '$STATE/journal.tsv'" "shell stage journals the files it creates"

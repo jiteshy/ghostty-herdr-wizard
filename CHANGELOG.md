@@ -4,7 +4,7 @@
 
 - 27 stages become 13, each with a name: `choices`, `install`, `ghostty`, `herdr`, `macos`, `prompt`, `shell`, `editor`, `review`, `yazi`, `github`, `statusline`, `tour`
   - `choices` asks every question first (icons, projects folder, default tabs) and saves the answers in `~/.ghostty-herdr-wizard/choices.env`. A re-run shows last time's answers and offers to use them
-  - `install` brews everything in one go, leaving out the tools of stages you `--skip`. A stage run on its own with `--only` still installs what it needs
+  - `install` brews everything in one go, leaving out the tools of stages you `--skip`. A stage run on its own with `--only` still brews the formulae it needs (casks such as Ghostty and the Nerd Font come only from `install`)
   - Ghostty's install, config, relaunch and herdr auto-start are one `ghostty` stage. Freeing Ctrl-Space, the herdr config and the Claude Code and Codex hooks are one `herdr` stage. delta, difftastic and lazygit are one `review` stage. The nine tour steps are one `tour` stage
 - `--from`, `--only` and `--skip` take stage names instead of numbers, e.g. `--only herdr,macos` or `--skip yazi,github`. An unknown name (or an old number) is rejected with the list of names. `--list` prints the names. `--tour` is `--only tour`
 - Tests: `bash tests/stages_test.sh`

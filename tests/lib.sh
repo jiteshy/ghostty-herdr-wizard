@@ -65,6 +65,14 @@ fake_brew() {
   chmod +x "$T/bin/brew"
   PATH="$T/bin:$PATH"
 }
+# fake_bat: put a bat on PATH whose Catppuccin themes are already there, so no
+# stage downloads them. Call after fake_brew.
+fake_bat() {
+  mkdir -p "$T/bin" "$T/bat/themes"
+  touch "$T/bat/themes/Catppuccin Mocha.tmTheme" "$T/bat/themes/Catppuccin Latte.tmTheme"
+  printf '#!/bin/sh\n[ "$1" = --config-dir ] && echo "%s/bat"\nexit 0\n' "$T" > "$T/bin/bat"
+  chmod +x "$T/bin/bat"
+}
 sha() { shasum -a 256 "$1" | awk '{print $1}'; }
 journal_lines() { grep -c . "$STATE/journal.tsv" 2>/dev/null || true; }
 

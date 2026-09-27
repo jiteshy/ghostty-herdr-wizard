@@ -150,11 +150,7 @@ test_choosing_plain_text_saves_it_and_skips_the_font() {
   new_home
   ( # subshell: the fake brew and bat on PATH never outlive this test
     fake_brew
-    # A bat whose themes are already there, so the install stage downloads nothing.
-    mkdir -p "$T/bat/themes"
-    touch "$T/bat/themes/Catppuccin Mocha.tmTheme" "$T/bat/themes/Catppuccin Latte.tmTheme"
-    printf '#!/bin/sh\n[ "$1" = --config-dir ] && echo "%s/bat"\nexit 0\n' "$T" > "$T/bin/bat"
-    chmod +x "$T/bin/bat"
+    fake_bat
     # banner, plain text, projects folder (Enter), don't create it, no tabs, done
     printf '\n2\n\nn\nn\n\n' > "$T/answers"
     CLI_INPUT="$T/answers" cli --only choices
