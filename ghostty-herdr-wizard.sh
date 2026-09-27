@@ -244,8 +244,16 @@ BACKED_UP=() # paths this run copied into the backup store
 KEPT=()      # changes --revert left alone because the user edited them since
 WROTE=0      # set by install_file: 1 if its last call wrote the file
 
-# Tabs opened on every new workspace and worktree. Empty disables the plugin.
-DEFAULT_TABS="agents,code,dev server,git review"
+# Tabs opened on every new workspace and worktree, in order: agents, source
+# code, local server, git review. Tab 4 opens the hunk review when herdr-hunk is
+# installed. Saved as the TABS choice; "none" (DEFAULT_TABS empty) turns the
+# plugin off.
+SUGGESTED_TABS="agents,source code,local server,git review"
+DEFAULT_TABS=$(choice_get TABS || true)
+case "$DEFAULT_TABS" in
+  none) DEFAULT_TABS="" ;;
+  "") DEFAULT_TABS="$SUGGESTED_TABS" ;;
+esac
 
 ok()  { printf '  %s✓%s %s\n' "$GREEN" "$RESET" "$1"; }
 cmd() { printf '  %s$ %s%s\n' "$DIM" "$*" "$RESET"; }
@@ -1913,27 +1921,61 @@ stage_yazi() {
   pause
 }
 
-# ask_default_tabs: decide which tabs new workspaces and worktrees open with.
-# Sets DEFAULT_TABS to a comma-separated list, or empty to turn the plugin off.
+# ask_default_tabs: the one tabs question. Explains tabs, shows the four, then
+# offers them as they are, renamed, or none. Sets and saves DEFAULT_TABS (a
+# comma-separated list, empty for none); Enter keeps the current answer.
 ask_default_tabs() {
-  if ! confirm "Open a default set of tabs on every new workspace and worktree?"; then
-    DEFAULT_TABS=""
-    return 0
+  local purposes=("Claude Code / Codex" "Neovim on the files" "npm run dev, logs" \
+    "hunk-by-hunk review of what the agent did")
+  local current=1 answer name i
+  local oldifs="$IFS"; IFS=','
+  local names=($DEFAULT_TABS)
+  (( ${#names[@]} == 4 )) || names=($SUGGESTED_TABS)
+  IFS="$oldifs"
+  if [[ -z "$DEFAULT_TABS" ]]; then current=3
+  elif [[ "$DEFAULT_TABS" != "$SUGGESTED_TABS" ]]; then current=2
   fi
-  say "The default set is:"
-  local item
-  local oldifs="$IFS"; IFS=','; local shown=($DEFAULT_TABS); IFS="$oldifs"
-  for item in "${shown[@]}"; do step "$item"; done
-  if confirm "Use those?"; then
-    return 0
-  fi
-  local TAB_LIST=""
-  ask TAB_LIST "Tab names, comma separated:"
-  if [[ -n "$TAB_LIST" ]]; then
-    DEFAULT_TABS="$TAB_LIST"
+
+  say "${BOLD}Tabs inside a workspace${RESET}"
+  note "A workspace is one repo. Tabs are separate terminals in it,"
+  note "all in the same folder, all kept running."
+  printf '\n'
+  say "herdr can open the same four in every new repo and worktree:"
+  printf '\n'
+  for i in 0 1 2 3; do
+    printf '  %d %-14s %s\n' $((i + 1)) "${names[$i]}" "${purposes[$i]}"
+  done
+  printf '\n'
+  say "1) use these four        (suggested)"
+  say "2) same idea, my names"
+  say "3) no default tabs, one plain tab"
+  printf '\n'
+  printf '  %schoice [%s]:%s ' "$BOLD" "$current" "$RESET"
+  read -r answer || true
+  case "${answer:-$current}" in
+    2)
+      note "Enter keeps the name shown."
+      for i in 0 1 2 3; do
+        printf '  %stab %d, %s [%s]:%s ' "$BOLD" $((i + 1)) "${purposes[$i]}" "${names[$i]}" "$RESET"
+        name=""
+        read -r name || true
+        name="${name//,/}"                        # commas separate the saved list
+        name="${name#"${name%%[![:space:]]*}"}"   # trim leading spaces
+        name="${name%"${name##*[![:space:]]}"}"   # trim trailing spaces
+        [[ -n "$name" ]] && names[$i]="$name"
+      done
+      DEFAULT_TABS="${names[0]},${names[1]},${names[2]},${names[3]}"
+      ;;
+    3) DEFAULT_TABS="" ;;
+    *) DEFAULT_TABS="$SUGGESTED_TABS" ;;
+  esac
+  choice_set TABS "${DEFAULT_TABS:-none}"
+  if [[ -n "$DEFAULT_TABS" ]]; then
+    ok "tabs: ${DEFAULT_TABS//,/, } (re-run this stage to change them)"
   else
-    note "nothing entered, keeping the default set"
+    ok "tabs: one plain tab (re-run this stage to change it)"
   fi
+  printf '\n'
 }
 
 # write_worktree_tabs_plugin: install and register the herdr plugin that opens
@@ -1992,6 +2034,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 
 HEAD
     printf '# The tabs to open. Edit this line to change them.\ntab_labels=(%s)\n\n' "$labels"
+    printf '# The tab that opens the hunk review, when herdr-hunk is installed. Empty for none.\nreview_tab=4\n\n'
     cat <<'TAIL'
 mode="${1:-workspace}"
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
@@ -2093,16 +2136,36 @@ for pane in data.get("result", {}).get("panes", []):
 "$herdr_bin" tab rename "$active_tab" "${tab_labels[0]}" >/dev/null 2>&1
 
 index=1
+review_tab_id=""
 while (( index < ${#tab_labels[@]} )); do
   if [[ -n "$cwd" ]]; then
-    "$herdr_bin" tab create --workspace "$workspace_id" --label "${tab_labels[$index]}" \
-      --cwd "$cwd" --no-focus >/dev/null 2>&1
+    created=$("$herdr_bin" tab create --workspace "$workspace_id" --label "${tab_labels[$index]}" \
+      --cwd "$cwd" --no-focus 2>/dev/null)
   else
-    "$herdr_bin" tab create --workspace "$workspace_id" --label "${tab_labels[$index]}" \
-      --no-focus >/dev/null 2>&1
+    created=$("$herdr_bin" tab create --workspace "$workspace_id" --label "${tab_labels[$index]}" \
+      --no-focus 2>/dev/null)
+  fi
+  if [[ "$(( index + 1 ))" == "${review_tab:-}" ]]; then
+    review_tab_id=$(printf '%s' "$created" | python3 -c '
+import json, sys
+try:
+    sys.stdout.write(json.load(sys.stdin)["result"]["tab"]["tab_id"])
+except (ValueError, KeyError, TypeError):
+    pass
+') || review_tab_id=""
   fi
   index=$(( index + 1 ))
 done
+
+# Open the hunk review in its tab. `tab create` has no --command, so this goes
+# through the plugin action, which reviews the tab focused when it is invoked.
+# On a brand-new workspace there is nothing to review yet, so hunk shows the
+# working tree until you refresh it once the agent has edited something.
+if [[ -n "$review_tab_id" ]] \
+  && "$herdr_bin" plugin list 2>/dev/null | grep -q 'jhochenbaum\.hunkdiff'; then
+  "$herdr_bin" tab focus "$review_tab_id" >/dev/null 2>&1
+  "$herdr_bin" plugin action invoke review --plugin jhochenbaum.hunkdiff >/dev/null 2>&1
+fi
 
 # Land on the first tab, not the last one created.
 "$herdr_bin" tab focus "$active_tab" >/dev/null 2>&1
@@ -2502,16 +2565,18 @@ stage_tour_agents() {
 stage_tour_tabs() {
   say "Inside one repo, give each kind of work its own tab so every view stays put:"
   printf '\n'
-  note "  1 agents       Claude / Codex sessions"
-  note "  2 code         nvim (with an agent beside it, next step)"
-  note "  3 dev server   dev server │ test watcher"
-  note "  4 git review   gds, lazygit, git log"
+  note "  1 agents        Claude Code / Codex"
+  note "  2 source code   Neovim on the files (with an agent beside it, next step)"
+  note "  3 local server  npm run dev, logs"
+  note "  4 git review    hunk-by-hunk review of what the agent did"
   printf '\n'
-  say "If you said yes to the default tab layout, every new workspace and worktree already"
-  say "opens with these, so there is nothing to set up per repo:"
+  say "If you chose default tabs, every new workspace and worktree already opens with"
+  say "these, so there is nothing to set up per repo. With herdr-hunk installed, tab 4"
+  say "opens straight into the review. It starts empty in a new repo: once the agent has"
+  say "edited something, run the 'hunk: reload the open review' action to refresh it."
   printf '\n'
-  step "In the 'code' tab run:  v .   to bring up nvim."
-  step "In 'dev server' start the dev server (e.g. npm run dev). Cmd-D and run the tests in"
+  step "In the 'source code' tab run:  v .   to bring up nvim."
+  step "In 'local server' start the dev server (e.g. npm run dev). Cmd-D and run the tests in"
   step "watch mode on the right."
   step "Cmd-1 / Cmd-2 / Cmd-3 jump between tabs. prefix n / p cycles through them."
   step "prefix Shift-T renames a tab, Cmd-T adds one."
@@ -2529,7 +2594,7 @@ stage_tour_nvim() {
   note "  │ read code, review diffs, fix up  │ prompts, plans, runs │"
   note "  └──────────────────────────────────┴──────────────────────┘"
   printf '\n'
-  step "In repo A's 'code' tab (nvim open): Cmd-D, run  claude  in the right pane."
+  step "In repo A's 'source code' tab (nvim open): Cmd-D, run  claude  in the right pane."
   step "Drag the border so nvim gets about 60%."
   step "prefix Space flips between nvim and Claude. prefix z zooms whichever you're in."
   printf '\n'
@@ -2547,7 +2612,7 @@ stage_tour_nvim() {
 stage_tour_review() {
   say "Let Claude change one file, then review it before anything gets committed."
   printf '\n'
-  step "In repo A's Claude (code tab): 'Add a one-line comment at the top of README.md saying"
+  step "In repo A's Claude (source code tab): 'Add a one-line comment at the top of README.md saying"
   step "what this repo is'. Approve the edit."
   step "In nvim: Space Space, open README.md. It updates on its own; the gutter marks the change."
   printf '\n'
@@ -2606,7 +2671,7 @@ stage_tour_resume() {
 stage_tour_habits() {
   say "Habits that make this setup pay off:"
   printf '\n'
-  note "• One workspace per repo, same tab order everywhere (agents, code, dev, review)."
+  note "• One workspace per repo, same tab order everywhere (agents, source code, local server, git review)."
   note "• Parallel work on one repo: one worktree per agent (prefix Shift-G). Merge via lazygit or a PR."
   note "• Let agents own their terminals: ask Claude to run the dev server or tests in a herdr pane."
   note "• Don't watch agents work. Notifications and prefix a bring you back when one needs you."
