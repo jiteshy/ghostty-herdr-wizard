@@ -299,6 +299,20 @@ test_yes_answers_the_agent_hook_questions() {
   cleanup
 }
 
+test_the_review_badge_covers_herdr_hunk() {
+  new_home
+  mkdir -p "$H/.config/herdr"
+  printf 'mine\n' > "$H/.config/herdr/config.toml"
+  wizard 'node_ok() { return 0; }; TOOLS=,review,; DEFAULT_TABS=; stage_badges review'
+  check "grep -q 'adds its own lines to 1 file' '$T/out' && grep -q '~/.config/herdr/config.toml' '$T/out'" \
+    "herdr-hunk's keys go into herdr's config, the rest stays"
+  wizard 'node_ok() { return 0; }; TOOLS=,review,; DEFAULT_TABS=agents; stage_badges review'
+  check "grep -q 'adds 2 new files' '$T/out'" "with default tabs, herdr-hunk's own config too"
+  wizard 'node_ok() { return 1; }; TOOLS=,review,; stage_badges review'
+  check "! grep -q 'herdr/config.toml' '$T/out'" "Node too old: no herdr-hunk, nothing of its listed"
+  cleanup
+}
+
 test_a_stage_without_files_says_nothing() {
   new_home
   wizard 'stage_badges macos; stage_badges tour'
