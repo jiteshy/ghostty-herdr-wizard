@@ -225,6 +225,17 @@ choice_set() {
 GLYPHS=$(choice_get GLYPHS || true)
 [[ "$GLYPHS" == off ]] || GLYPHS=on
 
+# Colours for Ghostty, herdr, bat, Neovim and yazi: "auto" is Catppuccin Latte
+# when macOS is light and Mocha when it's dark, "dark" is always Mocha, "none"
+# writes no theme anywhere. Asked in the choices stage.
+THEME=$(choice_get THEME || true)
+case "$THEME" in dark|none) ;; *) THEME=auto ;; esac
+
+# The starship prompt: "pure" or "tokyo" (see starship_config), or "none" to
+# leave ~/.config/starship.toml alone. Asked in the choices stage.
+PROMPT=$(choice_get PROMPT || true)
+case "$PROMPT" in tokyo|none) ;; *) PROMPT=pure ;; esac
+
 # The groups of tools the choices stage offers, each one checkbox: "key:title:
 # stage". Tools are grouped only where they need each other. A declined group
 # is neither installed nor configured, and a stage runs only when a group it
@@ -1057,8 +1068,14 @@ EOF
 font-size = 14
 
 # ── Look ──────────────────────────────────────────────
-# Always dark, same palette as herdr, nvim, bat and yazi.
-theme = Catppuccin Mocha
+EOF
+  case "$THEME" in
+    auto) printf '%s\n' "# Follows macOS light/dark, same palettes as herdr, nvim, bat and yazi." \
+      "theme = light:Catppuccin Latte,dark:Catppuccin Mocha" ;;
+    dark) printf '%s\n' "# Always dark, same palette as herdr, nvim, bat and yazi." \
+      "theme = Catppuccin Mocha" ;;
+  esac
+  cat <<'EOF'
 window-padding-x = 10
 window-padding-y = 8
 window-padding-balance = true
@@ -1169,51 +1186,107 @@ write_ghostty_config() {
   fi
 }
 
-# starship_config: the pastel-powerline preset with the Apple logo in place of
-# the username, plus Deno and Python versions next to Node and Bun.
-#
-# The preset only sets backgrounds, so text takes the terminal's default colour
-# and is hard to read in both light and dark mode. Each segment gets a fixed
-# text colour instead, with its background shifted until contrast is at least
-# 5:1 (WCAG AA is 4.5): white on darker shades, #1E1E2E on lighter ones.
-#
-# With the glyph switch off: starship's plain-text-symbols preset instead, which
-# spells symbols out ("git ", "nodejs ") so the prompt needs no Nerd Font.
-# (Its no-nerd-font preset still shows a glyph for the git branch.)
+# prompt_style: the starship config stage_prompt writes: PROMPT, except that
+# Tokyo Night needs the Nerd Font, so with the glyph switch off it's Pure.
+prompt_style() {
+  if [[ "$PROMPT" == tokyo && "$GLYPHS" != on ]]; then echo pure; else echo "$PROMPT"; fi
+}
+
+# starship_config [STYLE]: a hand-written starship.toml for STYLE (default:
+# prompt_style) showing just the folder and the git branch. Upstream presets
+# carry a dozen modules and change as starship does, so neither is built from one.
+#   pure   Pure-style, plain text, so it works in any font
+#   tokyo  Tokyo Night-style powerline segments, needs the Nerd Font
+# Segment text has at least 5:1 contrast with its background (WCAG AA is 4.5).
 starship_config() {
-  if [[ "$GLYPHS" != on ]]; then
-    starship preset plain-text-symbols
-    return
+  local folder=$'\xef\x81\xbb' branch=$'\xee\x9c\xa5' sep=$'\xee\x82\xb0'
+  case "${1:-$(prompt_style)}" in
+    pure) cat <<'EOF'
+# Pure-style prompt, written by ghostty-herdr-wizard.sh: the folder and the git
+# branch, then ❯ on its own line. Plain text, so any font works.
+# Reference: https://starship.rs/config
+format = """
+$directory$git_branch
+$character"""
+
+[directory]
+style = "blue"
+truncation_length = 3
+truncation_symbol = "…/"
+truncate_to_repo = false
+read_only = " ro"
+
+[git_branch]
+format = "[$branch]($style) "
+style = "bright-black"
+
+[character]
+success_symbol = "[❯](purple)"
+error_symbol = "[❯](red)"
+vimcmd_symbol = "[❮](green)"
+EOF
+      ;;
+    tokyo) cat <<EOF
+# Tokyo Night-style prompt, written by ghostty-herdr-wizard.sh: the folder and
+# the git branch on powerline segments. Needs a Nerd Font.
+# Reference: https://starship.rs/config
+format = "\$directory\$git_branch"
+
+[directory]
+style = "fg:#1a1b26 bg:#769ff0"
+format = "[ $folder \$path ](\$style)[$sep](fg:#769ff0) "
+truncation_length = 3
+truncation_symbol = "…/"
+truncate_to_repo = false
+read_only = " ro"
+
+[git_branch]
+symbol = "$branch"
+style = "fg:#c0caf5 bg:#394260"
+format = "[ \$symbol \$branch ](\$style)[$sep](fg:#394260) "
+EOF
+      ;;
+  esac
+}
+
+# prompt_preview STYLE: STYLE's prompt as it looks in this folder. starship
+# draws it when installed; before that (the choices stage runs before the
+# install stage) it's drawn here, to the same design.
+prompt_preview() {
+  local tmp out="" here branch
+  if command -v starship >/dev/null 2>&1; then
+    tmp=$(mktemp "${TMPDIR:-/tmp}/ghw-starship.XXXXXX")
+    starship_config "$1" > "$tmp"
+    # bash's \[ \] markers around colour codes would print as text.
+    out=$(STARSHIP_CONFIG="$tmp" STARSHIP_SHELL=bash starship prompt 2>/dev/null |
+      sed 's/\\\[//g; s/\\\]//g' | grep -v '^[[:space:]]*$') || true
+    rm -f "$tmp"
   fi
-  local apple=$'\xef\x85\xb9'
-  starship preset pastel-powerline | awk -v apple="$apple" '
-    $0 == "$username\\" { next }
-    $0 == "$bun\\" { print; print "$deno\\"; print "$python\\"; next }
-    /^\[os\]$/ { in_os = 1 }
-    in_os && /^disabled = true/ {
-      print "disabled = false"
-      print "format = \"[$symbol ]($style)\""
-      print ""
-      print "[os.symbols]"
-      print "Macos = \"" apple "\""
-      in_os = 0
-      next
-    }
-    { print }
-    END {
-      print ""
-      print "[deno]"
-      print "style = \"bg:#86BBD8\""
-      print "format = \x27[ $symbol ($version) ]($style)\x27"
-      print ""
-      print "[python]"
-      print "style = \"bg:#86BBD8\""
-      print "format = \x27[ $symbol ($version) ]($style)\x27"
-    }' | sed -E \
-      -e 's/#DA627D/#B8476B/g; s/#FCA17D/#FDB598/g; s/#86BBD8/#A3CBE1/g; s/#06969A/#057C7F/g' \
-      -e 's/^style = "bg:(#9A348E|#B8476B|#057C7F|#33658A)"/style = "fg:#FFFFFF bg:\1"/' \
-      -e 's/^style = "bg:(#FDB598|#A3CBE1)"/style = "fg:#1E1E2E bg:\1"/' \
-      -e 's/^(style_(user|root)) = "bg:#9A348E"/\1 = "fg:#FFFFFF bg:#9A348E"/'
+  if [[ -n "$out" ]]; then
+    sed 's/^/     /' <<<"$out"
+    printf '%s' "$RESET"
+    return 0
+  fi
+  # The last three folders, as starship's truncation_length = 3 shows them.
+  here=$(awk -F/ '{ n = NF - ($1 == ""); if (n > 3) print "…/" $(NF-2) "/" $(NF-1) "/" $NF; else print }' \
+    <<<"${PWD/#$HOME/\~}")
+  branch=$(git branch --show-current 2>/dev/null || true)
+  case "$1" in
+    pure)
+      printf '     %s%s%s%s\n' "$BLUE" "$here" "$RESET" "${branch:+ $DIM$branch$RESET}"
+      printf '     %s❯%s\n' "$BOLD" "$RESET"
+      ;;
+    tokyo)
+      local dir_bg="" git_bg="" dir_end="" git_end=""
+      if [[ -n "$RESET" ]]; then
+        dir_bg=$'\033[38;2;26;27;38;48;2;118;159;240m' dir_end=$'\033[0;38;2;118;159;240m'
+        git_bg=$'\033[38;2;192;202;245;48;2;57;66;96m' git_end=$'\033[0;38;2;57;66;96m'
+      fi
+      printf '     %s %s %s %s%s%s' "$dir_bg" $'\xef\x81\xbb' "$here" "$dir_end" $'\xee\x82\xb0' "$RESET"
+      [[ -n "$branch" ]] && printf ' %s %s %s %s%s%s' "$git_bg" $'\xee\x9c\xa5' "$branch" "$git_end" $'\xee\x82\xb0' "$RESET"
+      printf '\n'
+      ;;
+  esac
 }
 
 statusline_script() {
@@ -1341,7 +1414,7 @@ cluster_tools() {
     icons) printf '%s\n' "Nerd Font|JetBrains Mono Nerd Font, unless you have it: file, folder and git" \
       "|icons in the prompt, ls, yazi, Neovim, lazygit, herdr and the status line." \
       "|Unticked: plain text that works in any font (e.g. iTerm), no font install" ;;
-    prompt) printf '%s\n' "starship|a prompt showing folder, git branch and runtime versions" ;;
+    prompt) printf '%s\n' "starship|a prompt showing the folder and git branch, in the style you pick" ;;
     jumper) printf '%s\n' "fzf|fuzzy search: Ctrl-R history, Ctrl-T files, and the project picker" \
       "fd|fast file finder behind that search" \
       "eza|ls with git status and a tree view" \
@@ -1427,6 +1500,85 @@ ask_tools() {
   printf '\n'
 }
 
+# theme_name THEME: THEME as the choices summary says it.
+theme_name() {
+  case "$1" in
+    dark) echo "always dark" ;;
+    none) echo "left alone" ;;
+    *) echo "follow macOS light/dark" ;;
+  esac
+}
+
+# ask_theme: the colours question. Sets and saves THEME; Enter keeps the
+# current answer (follow macOS on a first run).
+ask_theme() {
+  local current=1 answer
+  case "$THEME" in dark) current=2 ;; none) current=3 ;; esac
+  say "${BOLD}Colours${RESET}"
+  note "Catppuccin in Ghostty, herdr, Neovim, yazi and bat."
+  printf '\n'
+  say "1) follow macOS light/dark  (suggested)"
+  note "   Latte while macOS is light, Mocha while it's dark"
+  say "2) always dark"
+  note "   Mocha, whatever macOS is set to"
+  say "3) leave my themes alone"
+  note "   the wizard sets no colours (ones it set before stay until --revert)"
+  printf '\n'
+  printf '  %schoice [%s]:%s ' "$BOLD" "$current" "$RESET"
+  answer=""
+  read -r answer || true
+  case "${answer:-$current}" in
+    2) THEME=dark ;;
+    3) THEME=none ;;
+    *) THEME=auto ;;
+  esac
+  choice_set THEME "$THEME"
+  ok "colours: $(theme_name "$THEME")"
+  if [[ "$THEME" == auto ]]; then
+    note "Ghostty, herdr, yazi and bat switch by themselves. A Neovim that's already"
+    note "open may need a restart to repaint after macOS switches."
+  fi
+  printf '\n'
+}
+
+# ask_prompt: the prompt question, both prompts previewed in this folder
+# first. Sets and saves PROMPT; Enter keeps the current answer (pure on a
+# first run). tokyo night needs the Nerd Font, so it's only offered with icons.
+ask_prompt() {
+  local current=1 answer none=3
+  [[ "$GLYPHS" == on ]] || none=2
+  case "$(prompt_style)" in tokyo) current=2 ;; none) current=$none ;; esac
+  say "${BOLD}Prompt${RESET}"
+  note "Two prompts, both showing just the folder and the git branch:"
+  printf '\n'
+  say "1) pure"
+  prompt_preview pure
+  printf '\n'
+  if [[ "$GLYPHS" == on ]]; then
+    say "2) tokyo night"
+    prompt_preview tokyo
+    printf '\n'
+  else
+    note "(tokyo night needs the Nerd Font, and icons are off)"
+    printf '\n'
+  fi
+  say "1) pure  (suggested)"
+  [[ "$GLYPHS" == on ]] && say "2) tokyo night"
+  say "$none) leave my prompt alone"
+  printf '\n'
+  printf '  %schoice [%s]:%s ' "$BOLD" "$current" "$RESET"
+  answer=""
+  read -r answer || true
+  answer=${answer:-$current}
+  if [[ "$answer" == "$none" ]]; then PROMPT=none
+  elif [[ "$answer" == 2 ]]; then PROMPT=tokyo
+  else PROMPT=pure
+  fi
+  choice_set PROMPT "$PROMPT"
+  ok "prompt: $(prompt_name "$PROMPT")"
+  printf '\n'
+}
+
 # ask_projects_dir: where the user keeps their repos. Sets and saves
 # PROJECTS_DIR; Enter keeps the current answer.
 ask_projects_dir() {
@@ -1453,6 +1605,8 @@ ask_projects_dir() {
 # choices_saved: true once every question in the choices stage has an answer.
 choices_saved() {
   choice_get GLYPHS >/dev/null && choice_get TOOLS >/dev/null && choice_get TABS >/dev/null &&
+    choice_get THEME >/dev/null &&
+    { ! selected prompt || choice_get PROMPT >/dev/null; } &&
     { ! selected jumper || choice_get PROJECTS_DIR >/dev/null; }
 }
 
@@ -1462,6 +1616,8 @@ show_choices() {
   tools=${tools%,}
   note "  icons            $GLYPHS"
   note "  tools            ${tools:-none beyond Ghostty and herdr}"
+  note "  colours          $(theme_name "$THEME")"
+  selected prompt && note "  prompt           $(prompt_name "$(prompt_style)")"
   selected jumper && note "  projects folder  $(current_projects_dir)"
   note "  default tabs     ${DEFAULT_TABS:-none, one plain tab}"
 }
@@ -1482,6 +1638,8 @@ stage_choices() {
     printf '\n'
   fi
   ask_tools
+  ask_theme
+  if selected prompt; then ask_prompt; fi
   if selected jumper; then ask_projects_dir; fi
   ask_default_tabs
   pause
@@ -1542,7 +1700,7 @@ stage_tools() {
 
 # bat_themes: the Catppuccin themes BAT_THEME points at, unless already there.
 bat_themes() {
-  selected jumper && command -v bat >/dev/null 2>&1 || return 0
+  [[ "$THEME" != none ]] && selected jumper && command -v bat >/dev/null 2>&1 || return 0
   local dir flavour fetched=false
   dir="$(bat --config-dir)/themes"
   mkdir -p "$dir"
@@ -1589,7 +1747,15 @@ stage_install() {
 }
 
 stage_ghostty() {
-  say "Font, Catppuccin Mocha theme (always dark), Option-as-Alt, quick terminal,"
+  local look check_colours=""
+  case "$THEME" in
+    auto) look="Catppuccin theme (light or dark with macOS)"
+      check_colours=", and colours are Catppuccin (Latte while macOS is light, Mocha while dark)" ;;
+    dark) look="Catppuccin Mocha theme (always dark)"
+      check_colours=", and colours are Catppuccin (dark mauve/pink tones)" ;;
+    none) look="Ghostty's own colours" ;;
+  esac
+  say "Font, $look, Option-as-Alt, quick terminal,"
   say "and Cmd shortcuts that drive herdr."
   write_ghostty_config
   if [[ "$GLYPHS" != on ]]; then
@@ -1599,7 +1765,9 @@ stage_ghostty() {
   else
     warn "Ghostty doesn't list 'JetBrainsMono Nerd Font' yet. It may appear after Ghostty restarts."
   fi
-  if "$GHOSTTY_BIN" +list-themes 2>/dev/null | grep "Catppuccin Mocha" >/dev/null; then
+  if [[ "$THEME" == none ]]; then
+    :
+  elif "$GHOSTTY_BIN" +list-themes 2>/dev/null | grep "Catppuccin Mocha" >/dev/null; then
     ok "Catppuccin themes found"
   else
     warn "Couldn't confirm the 'Catppuccin Mocha' theme name. Check with: ghostty +list-themes"
@@ -1625,12 +1793,12 @@ stage_ghostty() {
   step "Press Cmd-Shift-, (comma) to reload Ghostty's config."
   if [[ "$GLYPHS" != on ]]; then
     note "Icons are off, so there's no Nerd Font to check."
-    step "Check: colours are Catppuccin (dark mauve/pink tones)."
+    [[ -n "$check_colours" ]] && step "Check: ${check_colours#, and }."
   else
     say "Check the icons below. You should see: React, TypeScript, git branch, folder, Node, Apple."
     printf '\n      %s    %s    %s    %s    %s    %s\n\n' \
       $'\xee\x9e\xba' $'\xee\x98\xa8' $'\xee\x9c\xa5' $'\xef\x81\xbb' $'\xee\x9c\x98' $'\xef\x85\xb9'
-    step "Also check: text uses JetBrains Mono, and colours are Catppuccin (dark mauve/pink tones)."
+    step "Also check: text uses JetBrains Mono$check_colours."
     if ! confirm "Do all six icons render (no boxes or question marks)?"; then
       warn "Quit Ghostty fully (Cmd-Q), reopen it, and re-run. Fonts load at app start."
       SKIPPED+=("Nerd Font icons not rendering: restart Ghostty and check 'ghostty +list-fonts'")
@@ -1666,27 +1834,34 @@ free_ctrl_space() {
   fi
 }
 
+# prompt_name STYLE: STYLE as the prompt question and the choices summary say it.
+prompt_name() {
+  case "$1" in
+    tokyo) echo "tokyo night" ;;
+    none) echo "left alone" ;;
+    *) echo "$1" ;;
+  esac
+}
+
 stage_prompt() {
-  if [[ "$GLYPHS" == on ]]; then
-    say "Pastel powerline prompt:   Apple  ›  folder  ›  git branch  ›  Node/Bun/Deno/Python version  ›  time"
-  else
-    say "Plain-text prompt: folder, git branch and runtime versions, spelled out (icons are off)."
-  fi
-  note "Runtime versions only appear inside projects that use them (e.g. a package.json for Node)."
+  local style; style=$(prompt_style)
   stage_tools prompt
-  local preset
-  if preset=$(starship_config) && [[ -n "$preset" ]]; then
-    install_file "$HOME/.config/starship.toml" <<<"$preset"
-    printf '\n'
-    say "Preview (in this directory):"
-    printf '  '
-    STARSHIP_SHELL=bash starship prompt 2>/dev/null | tail -1 | sed 's/\\\[//g; s/\\\]//g' || true
-    printf '%s\n\n' "$RESET"
-    note "New shells use it. Tweak segments in ~/.config/starship.toml (https://starship.rs/config)."
-  else
-    warn "couldn't generate the starship prompt config; the default prompt still works"
-    SKIPPED+=("starship prompt config: bash $SCRIPT_PATH --only prompt")
+  if [[ "$style" == none ]]; then
+    say "starship is installed and ~/.zshrc starts it. Your prompt config is left alone:"
+    note "~/.config/starship.toml if you have one, starship's own look if not."
+    pause
+    return 0
   fi
+  say "The $(prompt_name "$style") prompt: just the folder and the git branch."
+  if [[ "$PROMPT" != "$style" ]]; then
+    note "tokyo night needs the Nerd Font and icons are off, so it's pure."
+  fi
+  install_file "$HOME/.config/starship.toml" < <(starship_config "$style")
+  printf '\n'
+  say "Preview (in this directory):"
+  prompt_preview "$style"
+  printf '\n'
+  note "New shells use it. Tweak it in ~/.config/starship.toml (https://starship.rs/config)."
   pause
 }
 
@@ -1803,7 +1978,13 @@ zprofile_block() {
   selected editor && printf '%s\n' 'export EDITOR=nvim VISUAL=nvim'
   if selected jumper; then
     printf 'export PROJECTS_DIR="%s"\n' "$1"
-    printf '%s\n' 'export BAT_THEME="Catppuccin Mocha"'
+    case "$THEME" in
+      # auto:system asks macOS, so bat is right in fzf's preview too, where it
+      # can't ask the terminal.
+      auto) printf '%s\n' 'export BAT_THEME="auto:system"' \
+        'export BAT_THEME_DARK="Catppuccin Mocha"' 'export BAT_THEME_LIGHT="Catppuccin Latte"' ;;
+      dark) printf '%s\n' 'export BAT_THEME="Catppuccin Mocha"' ;;
+    esac
   fi
   return 0
 }
@@ -1976,6 +2157,33 @@ return {
 EOF
 }
 
+# nvim_colorscheme: LazyVim's colorscheme.lua for THEME, empty for "none"
+# (LazyVim's own tokyonight).
+nvim_colorscheme() {
+  case "$THEME" in
+    auto) cat <<'EOF'
+-- Catppuccin: Latte when macOS is light, Mocha when it's dark, matching
+-- Ghostty, herdr, bat and yazi. Neovim asks the terminal which one at startup.
+return {
+  {
+    "catppuccin/nvim",
+    name = "catppuccin",
+    opts = { flavour = "auto", background = { light = "latte", dark = "mocha" } },
+  },
+  { "LazyVim/LazyVim", opts = { colorscheme = "catppuccin" } },
+}
+EOF
+      ;;
+    dark) cat <<'EOF'
+-- Catppuccin Mocha, fixed dark to match Ghostty, herdr, bat and yazi.
+return {
+  { "LazyVim/LazyVim", opts = { colorscheme = "catppuccin-mocha" } },
+}
+EOF
+      ;;
+  esac
+}
+
 stage_editor() {
   say "LazyVim with TypeScript, Tailwind, ESLint, Prettier, JSON and Markdown support,"
   say "tuned for working next to agents: auto-reload of changed files and Diffview for review."
@@ -2021,12 +2229,8 @@ stage_editor() {
     rm -f "$lazy_lua.new"
   fi
 
-  install_file "$nvim_dir/lua/plugins/colorscheme.lua" <<'EOF'
--- Catppuccin Mocha, fixed dark to match Ghostty, herdr, bat and yazi.
-return {
-  { "LazyVim/LazyVim", opts = { colorscheme = "catppuccin-mocha" } },
-}
-EOF
+  local colorscheme; colorscheme=$(nvim_colorscheme)
+  [[ -n "$colorscheme" ]] && install_file "$nvim_dir/lua/plugins/colorscheme.lua" <<<"$colorscheme"
   install_file "$nvim_dir/lua/plugins/icons.lua" < <(nvim_icons_plugin)
   install_file "$nvim_dir/lua/plugins/diffview.lua" <<'EOF'
 -- Review everything an agent changed: file list on the left, before/after on the right.
@@ -2073,17 +2277,17 @@ EOF
   fi
 }
 
-# yazi_theme: yazi's theme.toml. With the glyph switch off, it empties yazi's
-# icon rules and swaps its powerline separators for plain ones.
+# yazi_theme: yazi's theme.toml: the Catppuccin flavours THEME picks, and with
+# the glyph switch off, yazi's icon rules emptied and its powerline separators
+# swapped for plain ones. Empty when there's neither.
 yazi_theme() {
-  cat <<'EOF'
-[flavor]
-dark = "catppuccin-mocha"
-light = "catppuccin-mocha"
-EOF
+  case "$THEME" in
+    auto) printf '[flavor]\ndark = "catppuccin-mocha"\nlight = "catppuccin-latte"\n' ;;
+    dark) printf '[flavor]\ndark = "catppuccin-mocha"\nlight = "catppuccin-mocha"\n' ;;
+  esac
   [[ "$GLYPHS" == on ]] && return 0
+  [[ "$THEME" == none ]] || printf '\n'
   cat <<'EOF'
-
 # Plain text: every glyph in yazi's default theme, replaced.
 [tabs]
 sep_inner = { open = "[", close = "]" }
@@ -2122,8 +2326,12 @@ stage_yazi() {
   say "Three-column file browser with code, image and PDF previews."
   say "Opens with herdr prefix then f, or y in any shell."
   stage_tools yazi
-  local flavors_ok=true flavour
-  for flavour in catppuccin-mocha catppuccin-latte; do
+  local flavors_ok=true flavour flavours=""
+  case "$THEME" in
+    auto) flavours="catppuccin-mocha catppuccin-latte" ;;
+    dark) flavours="catppuccin-mocha" ;;
+  esac
+  for flavour in $flavours; do
     if [[ -d "$HOME/.config/yazi/flavors/$flavour.yazi" ]]; then
       ok "yazi flavour $flavour present"
     else
@@ -2134,10 +2342,11 @@ stage_yazi() {
       fi
     fi
   done
-  if $flavors_ok; then
-    install_file "$HOME/.config/yazi/theme.toml" < <(yazi_theme)
-  else
+  local theme; theme=$(yazi_theme)
+  if ! $flavors_ok; then
     SKIPPED+=("yazi Catppuccin flavours: ya pkg add yazi-rs/flavors:catppuccin-mocha")
+  elif [[ -n "$theme" ]]; then
+    install_file "$HOME/.config/yazi/theme.toml" <<<"$theme"
   fi
   pause
 }
@@ -2423,8 +2632,24 @@ herdr_popup() {
   printf 'description = "%s"\nwidth = "%s"\nheight = "%s"\n\n' "$3" "$4" "$4"
 }
 
+# herdr_theme: herdr's [theme] section for THEME, or nothing for "none".
+herdr_theme() {
+  case "$THEME" in
+    auto) cat <<'EOF'
+[theme]
+# Follows the terminal, which follows macOS light/dark.
+auto_switch = true
+dark_name = "catppuccin"
+light_name = "catppuccin-latte"
+
+EOF
+      ;;
+    dark) printf '[theme]\nname = "catppuccin"\nauto_switch = false\n\n' ;;
+  esac
+}
+
 # herdr_config: the full herdr config. The sidebar's agent indicators follow
-# the glyph switch.
+# the glyph switch, the colours THEME.
 herdr_config() {
   cat <<'EOF'
 # herdr config, written by ghostty-herdr-wizard.sh
@@ -2437,10 +2662,9 @@ onboarding = false
 shell_mode = "login"
 new_cwd = "follow"
 
-[theme]
-name = "catppuccin"
-auto_switch = false
-
+EOF
+  herdr_theme
+  cat <<'EOF'
 [keys]
 # Claude Code keeps Ctrl-B for backgrounding commands.
 prefix = "ctrl+space"

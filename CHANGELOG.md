@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- New colours question in the `choices` stage: 1) follow macOS light/dark (the default), 2) always dark, 3) leave my themes alone. Following macOS means Catppuccin Latte in light mode and Mocha in dark: Ghostty `theme = light:Catppuccin Latte,dark:Catppuccin Mocha`, herdr `auto_switch = true`, bat `BAT_THEME=auto:system` with a light and a dark theme, catppuccin.nvim with `flavour = "auto"`, and yazi's light flavour. Leaving themes alone writes no theme anywhere (Ghostty and herdr get none, no `BAT_THEME`, no Neovim `colorscheme.lua`, no yazi flavours). Saved as `THEME` in `choices.env`. An already-open Neovim may need a restart to repaint after macOS switches
+  - Fixes yazi showing a dark theme in light mode: its `light` flavour was set to `catppuccin-mocha`
+- New prompt question in the `choices` stage, asked with the starship prompt: 1) pure, 2) tokyo night, 3) leave my prompt alone. Both are short hand-written configs that show only the folder and the git branch, replacing the pastel-powerline preset (Apple logo, runtime versions, time). Both are previewed in your current folder before you choose: by starship itself when it's installed, drawn by the wizard before that. Pure is plain text; Tokyo Night needs the Nerd Font, so with icons off it isn't offered and a saved Tokyo Night falls back to Pure. Leaving the prompt alone still installs starship but writes no `~/.config/starship.toml`. Saved as `PROMPT` in `choices.env`
+- Tests: `bash tests/theme_test.sh`
 - The `choices` stage now starts with what to install. Ghostty, herdr and terminal-notifier are always installed. Everything else is one checkbox per group of tools that need each other, each tool listed with what it gives you: Nerd Font + icons (the icons switch), starship prompt, project jumper + fuzzy find (fzf, fd, eza, bat), shell typing help (zsh-autosuggestions, zsh-syntax-highlighting), editor (Neovim, LazyVim, tree-sitter-cli, ripgrep, fd), review (lazygit), file manager (yazi, poppler, resvg), GitHub (gh, gh-dash) and the Claude Code status line (jq comes with it). All are ticked to start with; type numbers to untick. The answer is saved as `TOOLS` in `choices.env`
   - An unticked group is not installed and its stage does not run. `Stage 3/9` counts only the stages you picked, and `--only` or `--from` on one you declined says so instead of running it
   - The `shell` stage always runs, since its blocks also carry Ghostty's shell integration, history, `keys` and the other groups' lines, but `~/.zshrc` and `~/.zprofile` only get lines for what you picked. herdr only gets popup keys for installed tools (prefix m projects, d lazygit, f yazi, i gh-dash), and so do Ghostty's matching Cmd-O, Cmd-E and Cmd-Shift-G. The `keys` cheat sheet lists only what you picked. The projects folder is only asked with the project jumper. The status line stage no longer asks a second time
@@ -30,7 +34,6 @@
 - When herdr-hunk is installed, tab 4 opens straight into its review (`herdr plugin action invoke review`), then focus returns to tab 1. Without it, tab 4 is a plain shell with the same label. The review tab is set by `review_tab=4` in `apply-tab-layout.sh`. The review fills tab 4 only when hunk's `review.placement` is `overlay`; the wizard sets that once it installs herdr-hunk itself
 - Tests: `bash tests/tabs_test.sh`
 - New keybindings: prefix `Shift-O` opens an existing worktree, prefix `Shift-K` deletes a worktree checkout
-- Themes are now always dark (Catppuccin Mocha) across Ghostty, herdr, bat, nvim and yazi, instead of following macOS light/dark
 
 ## 1.0.0 (2026-09-14)
 
