@@ -234,6 +234,29 @@ test_prompt_stage_writes_the_chosen_config_or_nothing() {
   cleanup
 }
 
+# The REPLACES badges and the plan only warn about files the stage will write.
+test_left_alone_files_are_not_stage_targets() {
+  new_home
+  mkdir -p "$H/.config/nvim/lua/config"
+  printf '{ "LazyVim/LazyVim" }\n' > "$H/.config/nvim/lua/config/lazy.lua"
+  wizard 'PROMPT=pure; stage_targets prompt'
+  check "grep -q 'starship.toml' '$T/out'" "pure: starship.toml is a target"
+  wizard 'PROMPT=none; stage_targets prompt'
+  check "! grep -q 'starship.toml' '$T/out'" "prompt left alone: starship.toml isn't"
+  wizard 'PROMPT=tokyo; GLYPHS=off; stage_targets prompt'
+  check "grep -q 'starship.toml' '$T/out'" "tokyo without icons (pure): still a target"
+  wizard 'THEME=auto; stage_targets editor'
+  check "grep -q 'colorscheme.lua' '$T/out'" "themed: colorscheme.lua is a target"
+  wizard 'THEME=none; stage_targets editor'
+  check "! grep -q 'colorscheme.lua' '$T/out'" "themes left alone: colorscheme.lua isn't"
+  check "grep -q 'icons.lua' '$T/out'" "themes left alone: the other Neovim files still are"
+  wizard 'THEME=none; GLYPHS=on; stage_targets yazi'
+  check "! grep -q 'theme.toml' '$T/out'" "themes left alone, icons on: yazi's theme.toml isn't"
+  wizard 'THEME=none; GLYPHS=off; stage_targets yazi'
+  check "grep -q 'theme.toml' '$T/out'" "themes left alone, icons off: it still is (plain text)"
+  cleanup
+}
+
 # ── the choices stage ─────────────────────────────────────────────────────
 
 test_choices_stage_asks_theme_and_prompt_and_shows_them_on_rerun() {

@@ -47,8 +47,11 @@ bash ghostty-herdr-wizard.sh --skip yazi,github    # do not do these steps
 bash ghostty-herdr-wizard.sh --from editor         # start at the editor step
 bash ghostty-herdr-wizard.sh --only statusline     # do only this step
 bash ghostty-herdr-wizard.sh --tour                # do the tour again
+bash ghostty-herdr-wizard.sh --yes                 # re-run with last time's answers, no pauses
 bash ghostty-herdr-wizard.sh --revert              # undo every config change
 ```
+
+With `--yes`, the steps that only you can do still wait for you: relaunching into Ghostty, allowing notifications and accessibility, and freeing Ctrl-Space. The script also still asks before it replaces a file you have changed.
 
 ## What the script does
 
@@ -60,7 +63,9 @@ The script does three types of work:
 2. It writes config files. If a file exists and is different, the script shows you the changes and asks you first. It keeps a copy of the old file in `~/.ghostty-herdr-wizard/backups/`.
 3. It tells you what to do for the steps that need a person. Examples: approve a macOS permission, or sign in to GitHub.
 
-**`choices`.** All the questions come first. First, what to install: Ghostty, herdr and terminal-notifier always, then one checkbox per group of tools that need each other (Nerd Font + icons, starship prompt, project jumper + fuzzy find, shell typing help, editor, lazygit for review, file manager, GitHub, Claude Code status line). All are ticked to start with. A group you untick is not installed and its step is skipped. Unticking icons gives plain text, which works in any font, so nothing shows as boxes in a terminal without a Nerd Font. Then the colours: follow macOS light and dark (the default), always dark, or leave your themes alone. Then the prompt, with both styles previewed in your current folder: Pure, Tokyo Night (only with icons), or leave your prompt alone. Then the folder with your repos (only with the project jumper), and the tabs that new workspaces open with. The answers are saved, and the next run offers to use them again.
+**`choices`.** All the questions come first. First, what to install: Ghostty, herdr and terminal-notifier always, then one checkbox per group of tools that need each other (Nerd Font + icons, starship prompt, project jumper + fuzzy find, shell typing help, editor, lazygit for review, file manager, GitHub, Claude Code status line). All are ticked to start with. A group you untick is not installed and its step is skipped. Unticking icons gives plain text, which works in any font, so nothing shows as boxes in a terminal without a Nerd Font. Then the colours: follow macOS light and dark (the default), always dark, or leave your themes alone. Then the prompt, with both styles previewed in your current folder: Pure, Tokyo Night (only with icons), or leave your prompt alone. Then the folder with your repos (only with the project jumper), and the tabs that new workspaces open with. The answers are saved, and the next run offers to use them again. Then the script shows its plan: how many tools it installs, which of your files it replaces, and the points where it needs you. Nothing happens until you say yes.
+
+Each step checks your files right before it runs. If it is about to replace a file you already have, it says so and names the file. A copy goes to `~/.ghostty-herdr-wizard/backups/`, and `--revert` puts it back.
 
 **`install`.** Install everything with Homebrew in one go: Ghostty, herdr and the tools you picked. Tools of steps you skip with `--skip` are not installed.
 
