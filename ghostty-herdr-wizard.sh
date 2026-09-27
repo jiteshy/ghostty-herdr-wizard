@@ -297,6 +297,14 @@ esac
 ok()  { printf '  %s✓%s %s\n' "$GREEN" "$RESET" "$1"; }
 cmd() { printf '  %s$ %s%s\n' "$DIM" "$*" "$RESET"; }
 
+# ask_or_yes "question": confirm, except that --yes answers yes. Only for a
+# question about the setup itself; a check of what the user sees, or replacing
+# their file, still asks.
+ask_or_yes() {
+  [[ "$YES" == 1 ]] && return 0
+  confirm "$1"
+}
+
 # run CMD...: show a command and run it. A failure is recorded for the closing
 # summary instead of aborting, so one flaky install doesn't sink the rest.
 run() {
@@ -1515,7 +1523,7 @@ plan_gate() {
   [[ "$YES" == 1 ]] && return 0
   confirm "Go?" && return 0
   printf '\n'
-  note "Nothing changed. Re-run any time; your answers are kept."
+  note "No files changed. Your answers are saved, so the next run can reuse them."
   return 1
 }
 
@@ -1911,13 +1919,7 @@ stage_review() {
   note "Opens with herdr prefix then d, or lg in any shell."
   stage_tools review
   printf '\n'
-  local lg_dir
-  if lg_dir=$(lazygit --print-config-dir 2>/dev/null) && [[ -n "$lg_dir" ]]; then
-    install_file "$lg_dir/config.yml" < <(lazygit_config)
-  else
-    warn "couldn't find lazygit's config directory"
-    SKIPPED+=("lazygit config not written")
-  fi
+  install_file "$(lazygit_dir)/config.yml" < <(lazygit_config)
   pause
 }
 
@@ -2589,7 +2591,7 @@ agent_integrations() {
   say "Claude Code"
   if herdr_integration_current claude; then
     ok "herdr hook installed and current"
-  elif confirm "Install herdr's Claude Code hook? (~/.claude/settings.json is backed up first)"; then
+  elif ask_or_yes "Install herdr's Claude Code hook? (~/.claude/settings.json is backed up first)"; then
     json_track "$HOME/.claude/settings.json" run herdr integration install claude || true
   else
     SKIPPED+=("herdr Claude hook: herdr integration install claude")
@@ -2607,7 +2609,7 @@ agent_integrations() {
     note "Codex isn't installed. Optional: brew install --cask codex, then: bash $SCRIPT_PATH --only herdr"
   elif herdr_integration_current codex; then
     ok "herdr hook installed and current"
-  elif confirm "Install herdr's Codex hook? (~/.codex config files are backed up first)"; then
+  elif ask_or_yes "Install herdr's Codex hook? (~/.codex config files are backed up first)"; then
     # One install, tracked around both files it may write.
     track_file "$HOME/.codex/config.toml" \
       track_file "$HOME/.codex/hooks.json" run herdr integration install codex
@@ -3083,6 +3085,9 @@ STAGES=(
 # one "KIND PATH" per line. KIND is file (written whole), dir (a folder moved
 # aside and replaced whole) or edit (the wizard's block or keys go in; the rest
 # of the file stays). Stages with no file of their own print nothing.
+#
+# Keep it in step with the stage_ functions: a path a stage writes but this
+# leaves out is a file the badges and the plan never warn about.
 stage_targets() {
   case "$1" in
     ghostty)
@@ -3092,8 +3097,10 @@ stage_targets() {
       [[ -n "$DEFAULT_TABS" ]] &&
         printf 'file %s\n' "$HERDR_PLUGIN_DIR/herdr-plugin.toml" "$HERDR_PLUGIN_DIR/apply-tab-layout.sh"
       printf 'file %s\n' "$HOME/.claude/skills/herdr/SKILL.md"
-      command -v claude >/dev/null 2>&1 && printf 'edit %s\n' "$HOME/.claude/settings.json"
-      command -v codex >/dev/null 2>&1 && printf 'edit %s\n' "$HOME/.codex/config.toml" "$HOME/.codex/hooks.json"
+      command -v claude >/dev/null 2>&1 && ! herdr_integration_current claude &&
+        printf 'edit %s\n' "$HOME/.claude/settings.json"
+      command -v codex >/dev/null 2>&1 && ! herdr_integration_current codex &&
+        printf 'edit %s\n' "$HOME/.codex/config.toml" "$HOME/.codex/hooks.json"
       ;;
     prompt)
       printf 'file %s\n' "$HOME/.config/starship.toml" ;;
@@ -3105,7 +3112,9 @@ stage_targets() {
     editor)
       local nvim="$HOME/.config/nvim"
       if grep -q 'LazyVim/LazyVim' "$nvim/lua/config/lazy.lua" 2>/dev/null; then
-        printf 'edit %s\n' "$nvim/lua/config/lazy.lua"
+        # Rewritten whole, and only to add the language extras.
+        grep -q 'extras.lang.typescript' "$nvim/lua/config/lazy.lua" ||
+          printf 'file %s\n' "$nvim/lua/config/lazy.lua"
         printf 'file %s\n' "$nvim/lua/plugins/colorscheme.lua" "$nvim/lua/plugins/icons.lua" \
           "$nvim/lua/plugins/diffview.lua"
         printf 'edit %s\n' "$nvim/lua/config/autocmds.lua"
@@ -3119,17 +3128,23 @@ stage_targets() {
     yazi)
       printf 'file %s\n' "$HOME/.config/yazi/theme.toml" ;;
     statusline)
-      command -v claude >/dev/null 2>&1 &&
-        printf '%s %s\n' file "$STATUSLINE" edit "$HOME/.claude/settings.json"
+      command -v claude >/dev/null 2>&1 || return 0
+      printf 'file %s\n' "$STATUSLINE"
+      statusline_configured || printf 'edit %s\n' "$HOME/.claude/settings.json"
       ;;
   esac
   return 0
 }
 
-# lazygit_dir: lazygit's config folder, also before lazygit is installed.
+# lazygit_dir: lazygit's config folder, also before lazygit is installed
+# (lazygit's own macOS default, unless XDG_CONFIG_HOME is set).
 lazygit_dir() {
-  lazygit --print-config-dir 2>/dev/null ||
+  local dir
+  if dir=$(lazygit --print-config-dir 2>/dev/null) && [[ -n "$dir" ]]; then
+    printf '%s' "$dir"
+  else
     printf '%s' "${XDG_CONFIG_HOME:-$HOME/Library/Application Support}/lazygit"
+  fi
 }
 
 # target_state KIND PATH: what writing PATH does to the filesystem as it is now.
@@ -3137,12 +3152,14 @@ lazygit_dir() {
 #   own       the wizard's own, untouched since it last wrote it
 #   edits     the user's file, which keeps everything but the wizard's part
 #   replaces  the user's file or folder, or the wizard's since edited by them
+# A folder is never "own": the journal keeps no hash to tell whether the user
+# has filled it since, and stage_targets only names one it will move aside.
 target_state() {
   local kind="$1" path="$2" entry
   if [[ ! -e "$path" ]]; then echo new; return; fi
   if [[ "$kind" == edit ]]; then echo edits; return; fi
-  if entry=$(journal_entry "$path") && [[ "${entry##*$'\t'}" == "$(
-    if [[ -d "$path" ]]; then echo dir; else sha256 "$path"; fi)" ]]; then
+  if [[ "$kind" == file ]] && entry=$(journal_entry "$path") &&
+    [[ "${entry##*$'\t'}" == "$(sha256 "$path")" ]]; then
     echo own
   else
     echo replaces
@@ -3157,15 +3174,17 @@ tilde() {
   printf '%s' "$p"
 }
 
-# count_paths PATH...: "1 file", "2 files", "1 folder", "1 file and 1 folder".
+# count_paths [--ADJECTIVE] PATH...: "1 file", "2 files", "1 folder", "1 file
+# and 1 folder"; with --new, "2 new files".
 count_paths() {
-  local p files=0 dirs=0 out=""
+  local p files=0 dirs=0 out="" adj=""
+  if [[ "${1:-}" == --* ]]; then adj="${1#--} "; shift; fi
   for p in "$@"; do if [[ -d "$p" || "$p" == */ ]]; then dirs=$((dirs + 1)); else files=$((files + 1)); fi; done
-  (( files == 1 )) && out="1 file"
-  (( files > 1 )) && out="$files files"
+  (( files == 1 )) && out="1 ${adj}file"
+  (( files > 1 )) && out="$files ${adj}files"
   (( files && dirs )) && out+=" and "
-  (( dirs == 1 )) && out+="1 folder"
-  (( dirs > 1 )) && out+="$dirs folders"
+  (( dirs == 1 )) && out+="1 ${adj}folder"
+  (( dirs > 1 )) && out+="$dirs ${adj}folders"
   printf '%s' "$out"
 }
 
@@ -3203,7 +3222,7 @@ stage_badges() {
   fi
   if (( ${#added[@]} )); then
     printf '\n'
-    ok "adds $(count_paths "${added[@]}" | sed 's/^\([0-9]*\) /\1 new /')"
+    ok "adds $(count_paths --new "${added[@]}")"
   fi
   return 0
 }
@@ -3216,7 +3235,7 @@ stage_runs() { stage_selected "$1" && stage_wanted "$1"; }
 tools_to_install() {
   local n
   # shellcheck disable=SC2046 # one formula per word
-  n=$(missing_formulae $(install_formulae) | grep -c .)
+  n=$(missing_formulae $(install_formulae) | grep -c . || true)
   [[ -d /Applications/Ghostty.app ]] || n=$((n + 1))
   if [[ "$GLYPHS" == on ]] && ! compgen -G "$HOME/Library/Fonts/JetBrainsMonoNerdFont*" >/dev/null; then
     n=$((n + 1))
@@ -3236,9 +3255,14 @@ show_plan() {
       [[ -n "$path" && "$(target_state "$kind" "$path")" == replaces ]] && replaces+=("$path")
     done < <(stage_targets "$slug")
   done
+  # In the order the stages meet them.
+  stage_runs install && ! xcode-select -p >/dev/null 2>&1 && needs+=("install the Xcode command line tools")
   stage_runs ghostty && ! in_ghostty && needs+=("relaunch into Ghostty")
-  stage_runs macos && needs+=("allow notifications" "allow accessibility")
   stage_runs herdr && ctrl_space_taken && needs+=("free ctrl+space")
+  stage_runs macos && needs+=("allow notifications" "allow accessibility")
+  stage_runs editor && ! grep -q 'LazyVim/LazyVim' "$HOME/.config/nvim/lua/config/lazy.lua" 2>/dev/null &&
+    needs+=("open Neovim once, while it sets itself up")
+  stage_runs github && ! gh auth status >/dev/null 2>&1 && needs+=("sign in to GitHub")
 
   printf '\n'
   say "${BOLD}Plan${RESET}"
@@ -3247,7 +3271,7 @@ show_plan() {
     if (( n )); then say "  install $n tool$( (( n == 1 )) || echo s)"; else say "  nothing new to install"; fi
   fi
   if (( ${#replaces[@]} )); then
-    say "  ${YELLOW}⚠ replaces $(count_paths "${replaces[@]}" | sed 's/^\([0-9]*\) /\1 existing /')${RESET}"
+    say "  ${YELLOW}⚠ replaces $(count_paths --existing "${replaces[@]}")${RESET}"
     for path in "${replaces[@]}"; do note "      $(tilde "$path")"; done
   else
     say "  replaces none of your files"
@@ -3358,9 +3382,11 @@ parse_args() {
   done
   # ${rest[@]+...}: bash 3.2 calls an empty array unbound under set -u.
   _parse_args ${rest[@]+"${rest[@]}"} || return 2
-  (( YES == 0 )) || [[ "$MODE" == run ]]
+  (( YES == 0 )) || [[ "$MODE" == run ]] || return 2
 }
 
+# _parse_args ARGS...: parse_args for everything but --yes: at most one flag
+# and its value. Returns 2 on bad usage.
 _parse_args() {
   case "${1:-}" in
     "") ;;

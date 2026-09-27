@@ -61,7 +61,7 @@ test_an_nvim_folder_that_isnt_lazyvim_is_replaced_whole() {
   check "grep -q 'REPLACES 1 folder you already have' '$T/out'" "the whole folder is named as replaced"
   check "grep -q '~/.config/nvim/$' '$T/out'" "shown as a folder"
   mkdir -p "$H/.config/nvim/lua/config"
-  printf 'spec = { { "LazyVim/LazyVim", import = "lazyvim.plugins" } }\n' > "$H/.config/nvim/lua/config/lazy.lua"
+  printf 'spec = { { "LazyVim/LazyVim", import = "lazyvim.plugins" }, { import = "lazyvim.plugins.extras.lang.typescript" } }\n' > "$H/.config/nvim/lua/config/lazy.lua"
   wizard 'stage_badges editor'
   check "! grep -q REPLACES '$T/out'" "an existing LazyVim is added to, not replaced"
   check "grep -q 'adds 4 new files' '$T/out'" "the three plugin files and autocmds.lua are new"
@@ -137,6 +137,9 @@ test_yes_skips_the_tour_unless_asked_for() {
 plan() {
   ( # subshell: the fake brew on PATH never outlives this call
     fake_brew
+    # The Xcode tools are there, whatever this machine has.
+    printf '#!/bin/sh\nexit 0\n' > "$T/bin/xcode-select"
+    chmod +x "$T/bin/xcode-select"
     wizard "export TERM_PROGRAM=Apple_Terminal HERDR_ENV=; GLYPHS=off; TOOLS=,review,
       parse_args $*; show_plan"
   )
@@ -205,7 +208,7 @@ test_saying_no_to_the_plan_changes_nothing() {
   )
   check "grep -q 'Plan' '$T/out' && grep -q 'Go?' '$T/out'" "the run shows the plan and asks once"
   check "[[ '$(cat "$T/status")' == 0 ]]" "no is a clean exit"
-  check "grep -q 'Nothing changed' '$T/out'" "and says nothing changed"
+  check "grep -q 'No files changed' '$T/out'" "and says no files changed"
   check "! grep -q 'Stage .* lazygit' '$T/out'" "no stage after choices ran"
   cleanup
 }
@@ -230,6 +233,69 @@ test_choices_alone_shows_no_plan() {
   printf '%s\n' '' y > "$T/answers"
   CLI_INPUT="$T/answers" cli --only choices
   check "! grep -q 'Plan' '$T/out'" "nothing to plan when only the questions run"
+  cleanup
+}
+
+test_the_plan_says_when_everything_is_installed() {
+  new_home
+  mkdir -p "$T/bin"
+  # A brew that has every formula already.
+  printf '#!/bin/sh\n[ "$1" = list ] && printf "%%s\\n" herdr terminal-notifier lazygit\nexit 0\n' > "$T/bin/brew"
+  chmod +x "$T/bin/brew"
+  wizard "PATH='$T/bin':\$PATH; export TERM_PROGRAM=ghostty; GLYPHS=off; TOOLS=,review,; show_plan"
+  if [[ -d /Applications/Ghostty.app ]]; then
+    check "grep -q 'nothing new to install' '$T/out'" "nothing missing, nothing to install"
+  else
+    check "grep -q 'install 1 tool$' '$T/out'" "only Ghostty is missing"
+  fi
+  cleanup
+}
+
+test_the_plan_names_every_stop_that_applies() {
+  new_home
+  mkdir -p "$T/bin"
+  # No Xcode tools, no gh login.
+  printf '#!/bin/sh\nexit 1\n' > "$T/bin/xcode-select"
+  printf '#!/bin/sh\nexit 1\n' > "$T/bin/gh"
+  chmod +x "$T/bin/xcode-select" "$T/bin/gh"
+  ( fake_brew; wizard "PATH='$T/bin':\$PATH; export TERM_PROGRAM=ghostty; TOOLS=,editor,github,; show_plan" )
+  local need
+  for need in 'install the Xcode command line tools' 'sign in to GitHub' 'open Neovim once'; do
+    check "grep -q '$need' '$T/out'" "lists: $need"
+  done
+  cleanup
+}
+
+test_edits_that_change_nothing_are_not_listed() {
+  new_home
+  mkdir -p "$H/.config/nvim/lua/config"
+  printf '"LazyVim/LazyVim"\n"lazyvim.plugins.extras.lang.typescript"\n' > "$H/.config/nvim/lua/config/lazy.lua"
+  wizard 'stage_badges editor'
+  check "! grep -q 'lazy.lua' '$T/out'" "extras already on: lazy.lua isn't touched"
+  printf '"LazyVim/LazyVim"\n' > "$H/.config/nvim/lua/config/lazy.lua"
+  wizard 'stage_badges editor'
+  check "grep -q 'REPLACES 1 file' '$T/out' && grep -q 'lazy.lua' '$T/out'" \
+    "adding extras rewrites lazy.lua whole, so it's a replace"
+  cleanup
+}
+
+test_a_folder_the_wizard_once_made_is_still_replaced() {
+  new_home
+  mkdir -p "$H/.config/nvim"
+  printf 'x\n' > "$H/.config/nvim/init.vim"
+  wizard 'journal_init; JOURNALING=1; journal_write "$HOME/.config/nvim" false'
+  wizard 'stage_badges editor'
+  check "grep -q 'REPLACES 1 folder' '$T/out'" "a non-LazyVim nvim folder is moved aside, whoever made it"
+  cleanup
+}
+
+test_yes_answers_the_agent_hook_questions() {
+  new_home
+  wizard 'YES=1; ask_or_yes "Install it?" && echo said-yes'
+  check "grep -q said-yes '$T/out' && ! grep -q 'Install it' '$T/out'" "--yes says yes without asking"
+  printf 'n\n' > "$T/answers"
+  wizard 'ask_or_yes "Install it?" && echo said-yes'
+  check "grep -q 'Install it' '$T/out' && ! grep -q said-yes '$T/out'" "without --yes it asks"
   cleanup
 }
 
