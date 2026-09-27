@@ -245,7 +245,11 @@ KEPT=()      # changes --revert left alone because the user edited them since
 WROTE=0      # set by install_file: 1 if its last call wrote the file
 
 # Tabs opened on every new workspace and worktree. Empty disables the plugin.
-DEFAULT_TABS="agents,code,dev server,git review"
+STANDARD_TABS="agents,code,dev server,git review"
+DEFAULT_TABS="$STANDARD_TABS"
+# The choices stage's answer, if saved. Saved empty means no default tabs.
+if saved_tabs=$(choice_get TABS); then DEFAULT_TABS="$saved_tabs"; fi
+unset saved_tabs
 
 ok()  { printf '  %s✓%s %s\n' "$GREEN" "$RESET" "$1"; }
 cmd() { printf '  %s$ %s%s\n' "$DIM" "$*" "$RESET"; }
@@ -260,10 +264,15 @@ run() {
   return 0
 }
 
-# current_projects_dir: where the user keeps their repos. Remembered in the
-# wizard's ~/.zprofile block; otherwise the first common folder that exists.
+# current_projects_dir: where the user keeps their repos. The choices stage's
+# answer, else the one remembered in the wizard's ~/.zprofile block, else the
+# first common folder that exists.
 current_projects_dir() {
   local line candidate
+  if line=$(choice_get PROJECTS_DIR) && [[ -n "$line" ]]; then
+    printf '%s' "$line"
+    return 0
+  fi
   line=$(grep -E '^export PROJECTS_DIR=' "$HOME/.zprofile" 2>/dev/null | tail -1 || true)
   if [[ -n "$line" ]]; then
     line=${line#export PROJECTS_DIR=}
@@ -289,15 +298,23 @@ in_ghostty() { [[ "${TERM_PROGRAM:-}" == "ghostty" || -n "${HERDR_ENV:-}" ]]; }
 
 # brew_formulae NAME...: install only the formulae not already present.
 brew_formulae() {
-  local missing=() f
-  for f in "$@"; do
-    brew list --formula "$f" >/dev/null 2>&1 || missing+=("$f")
-  done
-  if (( ${#missing[@]} == 0 )); then
+  local missing
+  missing=$(missing_formulae "$@")
+  if [[ -z "$missing" ]]; then
     ok "already installed: $*"
   else
-    run brew install "${missing[@]}"
+    # shellcheck disable=SC2086 # one formula per word
+    run brew install $missing
   fi
+}
+
+# missing_formulae NAME...: the ones Homebrew doesn't have installed, one per line.
+missing_formulae() {
+  local installed f
+  installed=" $(brew list --formula -1 2>/dev/null | tr '\n' ' ') "
+  for f in "$@"; do
+    [[ "$installed" == *" $f "* ]] || printf '%s\n' "$f"
+  done
 }
 
 # ── Journal and backup store ──────────────────────────────────────────────
@@ -1261,11 +1278,8 @@ statusline_configured() {
 
 # ── Stages ────────────────────────────────────────────────────────────────
 
-stage_preflight() {
-  say "Checks the basics. Nothing is changed here."
-  say "Every later file change shows a diff first and keeps a backup in:"
-  note "$BACKUP_DIR"
-  printf '\n'
+# preflight: stop before any stage on a machine the wizard can't set up.
+preflight() {
   if [[ "$(uname -s)" != "Darwin" ]]; then
     warn "This wizard targets macOS (Ghostty, Homebrew casks, macOS settings)."
     exit 1
@@ -1274,18 +1288,6 @@ stage_preflight() {
     warn "Homebrew not found. Install it from https://brew.sh and re-run."
     exit 1
   fi
-  ok "Homebrew: $(brew --version | head -1)"
-  ok "git: $(git --version)"
-  if xcode-select -p >/dev/null 2>&1; then
-    ok "Xcode command line tools present (Neovim needs a C compiler for syntax parsers)"
-  else
-    warn "Xcode command line tools missing. A macOS dialog will open."
-    run xcode-select --install
-    pause "Finish the install in that dialog, then press Enter"
-  fi
-  ok "macOS $(sw_vers -productVersion)"
-  note "Tip: don't press Cmd-D / Cmd-T while the wizard runs. They send herdr commands."
-  pause
 }
 
 # ask_glyphs: the Nerd Font + icons question. Sets and saves GLYPHS; Enter keeps
@@ -1310,14 +1312,116 @@ ask_glyphs() {
     *) GLYPHS=on ;;
   esac
   choice_set GLYPHS "$GLYPHS"
-  ok "icons: $GLYPHS (re-run this stage to change it)"
+  ok "icons: $GLYPHS"
   printf '\n'
 }
 
-stage_install_ghostty() {
-  say "Ghostty is the terminal app."
+# ask_projects_dir: where the user keeps their repos. Sets and saves
+# PROJECTS_DIR; Enter keeps the current answer.
+ask_projects_dir() {
+  local projects answer
+  projects=$(current_projects_dir)
+  say "${BOLD}Projects folder${RESET}"
+  note "Where you keep your git repos. 'p' and herdr's prefix m search this folder."
+  printf '  %sProjects folder%s %s[Enter keeps %s]%s ' "$BOLD" "$RESET" "$DIM" "$projects" "$RESET"
+  read -r answer || true
+  if [[ -n "$answer" ]]; then projects="${answer/#\~/$HOME}"; fi
+  if [[ ! -d "$projects" ]]; then
+    if confirm "$projects doesn't exist. Create it?"; then
+      # Deliberately not journaled: it fills with the user's repos, and
+      # --revert must never move those.
+      mkdir -p "$projects"
+    else
+      warn "p and prefix m will find nothing until $projects exists"
+    fi
+  fi
+  PROJECTS_DIR="$projects"
+  choice_set PROJECTS_DIR "$projects"
   printf '\n'
+}
+
+# choices_saved: true once every question in the choices stage has an answer.
+choices_saved() {
+  choice_get GLYPHS >/dev/null && choice_get PROJECTS_DIR >/dev/null && choice_get TABS >/dev/null
+}
+
+# show_choices: last run's answers, one per line.
+show_choices() {
+  note "  icons            $GLYPHS"
+  note "  projects folder  $(current_projects_dir)"
+  note "  default tabs     ${DEFAULT_TABS:-none, one plain tab}"
+}
+
+stage_choices() {
+  say "Every question up front. The stages after this run from your answers, which"
+  say "are saved in $CHOICES for re-runs and --only."
+  printf '\n'
+  if choices_saved; then
+    say "Last time's answers:"
+    show_choices
+    printf '\n'
+    if confirm "Use last time's answers?"; then
+      return 0
+    fi
+    printf '\n'
+  fi
   ask_glyphs
+  ask_projects_dir
+  ask_default_tabs
+  choice_set TABS "$DEFAULT_TABS"
+  pause
+}
+
+# stage_formulae SLUG: the Homebrew formulae the stage SLUG configures.
+stage_formulae() {
+  case "$1" in
+    herdr) echo herdr terminal-notifier ;;
+    prompt) echo starship ;;
+    shell) echo bat eza fd ripgrep fzf zoxide glow jless btop tlrc zsh-autosuggestions zsh-syntax-highlighting ;;
+    editor) echo neovim tree-sitter-cli ripgrep fd ;;
+    review) echo git-delta difftastic lazygit ;;
+    yazi) echo yazi poppler resvg ;;
+    github) echo gh ;;
+    statusline) echo jq ;;
+  esac
+}
+
+# install_formulae: every formula the install stage brews, once each: those of
+# every stage this run doesn't skip.
+install_formulae() {
+  local entry slug f seen=" "
+  for entry in "${STAGES[@]}"; do
+    slug=${entry%%:*}
+    [[ "$SKIP" == *",$slug,"* ]] && continue
+    for f in $(stage_formulae "$slug"); do
+      [[ "$seen" == *" $f "* ]] && continue
+      seen+="$f "
+      printf '%s\n' "$f"
+    done
+  done
+}
+
+# stage_tools NAME: install whatever the stage NAME needs that isn't there yet,
+# for a stage run on its own (--only). Silent when the install stage did it.
+stage_tools() {
+  local missing
+  # shellcheck disable=SC2046,SC2086 # one formula per word
+  missing=$(missing_formulae $(stage_formulae "$1"))
+  # shellcheck disable=SC2086
+  [[ -z "$missing" ]] || run brew install $missing
+}
+
+stage_install() {
+  say "Installs everything with Homebrew in one go. Tools you already have are left alone."
+  note "Tip: don't press Cmd-D / Cmd-T while the wizard runs. They send herdr commands."
+  printf '\n'
+  if xcode-select -p >/dev/null 2>&1; then
+    ok "Xcode command line tools present (Neovim needs a C compiler for syntax parsers)"
+  else
+    warn "Xcode command line tools missing. A macOS dialog will open."
+    run xcode-select --install
+    pause "Finish the install in that dialog, then press Enter"
+  fi
   if [[ -d /Applications/Ghostty.app ]]; then
     ok "Ghostty already in /Applications"
   else
@@ -1330,10 +1434,27 @@ stage_install_ghostty() {
   else
     run brew install --cask font-jetbrains-mono-nerd-font
   fi
+  # shellcheck disable=SC2046 # one formula per word
+  brew_formulae $(install_formulae)
+  if command -v bat >/dev/null 2>&1; then
+    say "Catppuccin themes for bat (delta reuses them):"
+    local bat_themes flavour
+    bat_themes="$(bat --config-dir)/themes"
+    mkdir -p "$bat_themes"
+    for flavour in Mocha Latte; do
+      if [[ -f "$bat_themes/Catppuccin $flavour.tmTheme" ]]; then
+        ok "bat theme Catppuccin $flavour present"
+      else
+        run curl -fsSL -o "$bat_themes/Catppuccin $flavour.tmTheme" \
+          "https://raw.githubusercontent.com/catppuccin/bat/main/themes/Catppuccin%20$flavour.tmTheme"
+      fi
+    done
+    run bat cache --build
+  fi
   pause
 }
 
-stage_ghostty_config() {
+stage_ghostty() {
   say "Font, Catppuccin Mocha theme (always dark), Option-as-Alt, quick terminal,"
   say "and Cmd shortcuts that drive herdr."
   write_ghostty_config
@@ -1349,38 +1470,45 @@ stage_ghostty_config() {
   else
     warn "Couldn't confirm the 'Catppuccin Mocha' theme name. Check with: ghostty +list-themes"
   fi
-  pause
-}
-
-stage_move_into_ghostty() {
+  printf '\n'
+  say "Every new Ghostty window (launch, Dock click, Cmd-N, quick terminal) follows one rule:"
+  note "  herdr not open in any window   → the window attaches herdr"
+  note "  herdr already open elsewhere   → plain shell. So Cmd-N is your 'without herdr' shortcut"
+  note "  detach herdr with prefix q     → the window stays open as a plain shell; type herdr to go back"
+  printf '\n'
   if ! in_ghostty; then
     say "The rest of the setup needs to run inside Ghostty so you can check how it looks."
     open -a Ghostty || warn "couldn't open Ghostty; open it from /Applications"
-    printf 'bash %q --from 4' "$SCRIPT_PATH" | pbcopy
+    printf 'bash %q --from ghostty' "$SCRIPT_PATH" | pbcopy
     step "If macOS asks whether to open Ghostty, click Open."
     step "In the Ghostty window, press Cmd-V then Enter (the re-run command is on your clipboard):"
-    note "bash $SCRIPT_PATH --from 4"
+    note "bash $SCRIPT_PATH --from ghostty"
     printf '\n'
     note "This window's part is done. You can close it."
     exit 0
   fi
   ok "Running inside Ghostty"
+  step "Press Cmd-Shift-, (comma) to reload Ghostty's config."
   if [[ "$GLYPHS" != on ]]; then
     note "Icons are off, so there's no Nerd Font to check."
     step "Check: colours are Catppuccin (dark mauve/pink tones)."
-    return 0
+  else
+    say "Check the icons below. You should see: React, TypeScript, git branch, folder, Node, Apple."
+    printf '\n      %s    %s    %s    %s    %s    %s\n\n' \
+      $'\xee\x9e\xba' $'\xee\x98\xa8' $'\xee\x9c\xa5' $'\xef\x81\xbb' $'\xee\x9c\x98' $'\xef\x85\xb9'
+    step "Also check: text uses JetBrains Mono, and colours are Catppuccin (dark mauve/pink tones)."
+    if ! confirm "Do all six icons render (no boxes or question marks)?"; then
+      warn "Quit Ghostty fully (Cmd-Q), reopen it, and re-run. Fonts load at app start."
+      SKIPPED+=("Nerd Font icons not rendering: restart Ghostty and check 'ghostty +list-fonts'")
+    fi
   fi
-  say "Check the icons below. You should see: React, TypeScript, git branch, folder, Node, Apple."
-  printf '\n      %s    %s    %s    %s    %s    %s\n\n' \
-    $'\xee\x9e\xba' $'\xee\x98\xa8' $'\xee\x9c\xa5' $'\xef\x81\xbb' $'\xee\x9c\x98' $'\xef\x85\xb9'
-  step "Also check: text uses JetBrains Mono, and colours are Catppuccin (dark mauve/pink tones)."
-  if ! confirm "Do all six icons render (no boxes or question marks)?"; then
-    warn "Quit Ghostty fully (Cmd-Q), reopen it, and re-run. Fonts load at app start."
-    SKIPPED+=("Nerd Font icons not rendering: restart Ghostty and check 'ghostty +list-fonts'")
-  fi
+  step "Try it: press Cmd-N. With herdr open here, the new window is a plain shell. Cmd-W closes it."
+  note "Later, close every Ghostty window and click the Dock icon: it opens straight into herdr."
+  pause
 }
 
-stage_free_ctrl_space() {
+# free_ctrl_space: herdr's prefix needs Ctrl-Space, which macOS takes by default.
+free_ctrl_space() {
   say "herdr's prefix is Ctrl-Space. macOS uses that key to switch keyboard input"
   say "source by default, which would swallow it."
   if ctrl_space_taken; then
@@ -1402,39 +1530,16 @@ stage_free_ctrl_space() {
   else
     ok "Ctrl-Space is already free"
   fi
-  pause
 }
 
-stage_toolbelt() {
-  say "bat (cat with syntax), eza (ls with git status), fd + ripgrep (find/grep), fzf (fuzzy"
-  say "finder), zoxide (jump dirs), glow (markdown), jless (JSON viewer), btop (processes),"
-  say "tlrc (tldr examples), zsh autosuggestions + syntax highlighting."
-  brew_formulae bat eza fd ripgrep fzf zoxide starship glow jless btop tlrc jq \
-    zsh-autosuggestions zsh-syntax-highlighting
-  say "Catppuccin themes for bat (delta reuses them):"
-  local bat_themes flavour
-  bat_themes="$(bat --config-dir)/themes"
-  mkdir -p "$bat_themes"
-  for flavour in Mocha Latte; do
-    if [[ -f "$bat_themes/Catppuccin $flavour.tmTheme" ]]; then
-      ok "bat theme Catppuccin $flavour present"
-    else
-      run curl -fsSL -o "$bat_themes/Catppuccin $flavour.tmTheme" \
-        "https://raw.githubusercontent.com/catppuccin/bat/main/themes/Catppuccin%20$flavour.tmTheme"
-    fi
-  done
-  run bat cache --build
-  pause
-}
-
-stage_starship() {
+stage_prompt() {
   if [[ "$GLYPHS" == on ]]; then
     say "Pastel powerline prompt:   Apple  ›  folder  ›  git branch  ›  Node/Bun/Deno/Python version  ›  time"
   else
     say "Plain-text prompt: folder, git branch and runtime versions, spelled out (icons are off)."
   fi
   note "Runtime versions only appear inside projects that use them (e.g. a package.json for Node)."
-  brew_formulae starship
+  stage_tools prompt
   local preset
   if preset=$(starship_config) && [[ -n "$preset" ]]; then
     install_file "$HOME/.config/starship.toml" <<<"$preset"
@@ -1446,7 +1551,7 @@ stage_starship() {
     note "New shells use it. Tweak segments in ~/.config/starship.toml (https://starship.rs/config)."
   else
     warn "couldn't generate the starship prompt config; the default prompt still works"
-    SKIPPED+=("starship prompt config: re-run this stage")
+    SKIPPED+=("starship prompt config: bash $SCRIPT_PATH --only prompt")
   fi
   pause
 }
@@ -1541,25 +1646,17 @@ EOF
 }
 
 stage_shell() {
+  say "bat (cat with syntax), eza (ls with git status), fd + ripgrep (find/grep), fzf (fuzzy"
+  say "finder), zoxide (jump dirs), glow (markdown), jless (JSON viewer), btop (processes),"
+  say "tlrc (tldr examples), zsh autosuggestions + syntax highlighting."
   say "Adds a marked block to ~/.zprofile and ~/.zshrc. Your existing lines stay as they are."
   note "Aliases like ls→eza and cat→bat are skipped inside Claude Code's shell, so agents"
   note "get the real commands and their flags."
   printf '\n'
-  local projects answer projects_line
+  stage_tools shell
+  local projects projects_line
   projects=$(current_projects_dir)
-  say "Where do you keep your git repos? 'p' and herdr's prefix m search this folder."
-  printf '  %sProjects folder%s %s[Enter keeps %s]%s ' "$BOLD" "$RESET" "$DIM" "$projects" "$RESET"
-  read -r answer || true
-  if [[ -n "$answer" ]]; then projects="${answer/#\~/$HOME}"; fi
-  if [[ ! -d "$projects" ]]; then
-    if confirm "$projects doesn't exist. Create it?"; then
-      # Deliberately not journaled: it fills with the user's repos, and
-      # --revert must never move those.
-      mkdir -p "$projects"
-    else
-      warn "p and prefix m will find nothing until $projects exists"
-    fi
-  fi
+  ok "projects folder: $projects"
   if [[ "$projects" == "$HOME"/* ]]; then
     projects_line="\$HOME${projects#"$HOME"}"
   else
@@ -1585,10 +1682,8 @@ EOF
   pause
 }
 
-stage_git_diffs() {
-  say "delta: every git diff/log/show gets syntax highlighting, line numbers, n/N to jump files."
-  say "difftastic: structural diffs that ignore formatting noise (git dft, git dlog)."
-  brew_formulae git-delta difftastic
+# git_diff_settings: delta and difftastic as git's diff tools, if the user agrees.
+git_diff_settings() {
   say "These global git settings will be applied:"
   note "core.pager=delta  interactive.diffFilter='delta --color-only'"
   note "delta.navigate=true  delta.line-numbers=true"
@@ -1612,7 +1707,6 @@ stage_git_diffs() {
   else
     SKIPPED+=("git delta/difftastic settings not applied")
   fi
-  pause
 }
 
 # lazygit_config: lazygit's config.yml. Nerd Font icons only with the glyph
@@ -1644,10 +1738,15 @@ os:
 EOF
 }
 
-stage_lazygit() {
-  say "A full git UI: stage single lines or hunks, commit, rebase, resolve conflicts."
-  say "Diffs render through delta; press | inside lazygit to switch to difftastic."
-  brew_formulae lazygit
+stage_review() {
+  say "delta: every git diff/log/show gets syntax highlighting, line numbers, n/N to jump files."
+  say "difftastic: structural diffs that ignore formatting noise (git dft, git dlog)."
+  say "lazygit: a full git UI. Stage single lines or hunks, commit, rebase, resolve conflicts."
+  note "lazygit renders diffs through delta; press | inside lazygit to switch to difftastic."
+  stage_tools review
+  printf '\n'
+  git_diff_settings
+  printf '\n'
   local lg_dir
   if lg_dir=$(lazygit --print-config-dir 2>/dev/null) && [[ -n "$lg_dir" ]]; then
     install_file "$lg_dir/config.yml" < <(lazygit_config)
@@ -1661,7 +1760,7 @@ stage_lazygit() {
 stage_github() {
   say "gh-dash lists your PRs, review requests and issues in the terminal. Opens with"
   say "herdr prefix then i. Press d on a PR to see its diff, c to comment."
-  brew_formulae gh
+  stage_tools github
   if gh auth status >/dev/null 2>&1; then
     ok "gh is already logged in"
   else
@@ -1747,11 +1846,11 @@ return {
 EOF
 }
 
-stage_neovim() {
+stage_editor() {
   say "LazyVim with TypeScript, Tailwind, ESLint, Prettier, JSON and Markdown support,"
   say "tuned for working next to agents: auto-reload of changed files and Diffview for review."
   note "Other languages (Python, Go, Rust, …): run :LazyExtras inside Neovim and press x to enable."
-  brew_formulae neovim tree-sitter-cli
+  stage_tools editor
   local nvim_dir="$HOME/.config/nvim" fresh=false
   local lazy_lua="$nvim_dir/lua/config/lazy.lua"
   if [[ -f "$lazy_lua" ]] && grep -q 'LazyVim/LazyVim' "$lazy_lua"; then
@@ -1892,7 +1991,7 @@ EOF
 stage_yazi() {
   say "Three-column file browser with code, image and PDF previews."
   say "Opens with herdr prefix then f, or y in any shell."
-  brew_formulae yazi poppler resvg
+  stage_tools yazi
   local flavors_ok=true flavour
   for flavour in catppuccin-mocha catppuccin-latte; do
     if [[ -d "$HOME/.config/yazi/flavors/$flavour.yazi" ]]; then
@@ -1920,6 +2019,8 @@ ask_default_tabs() {
     DEFAULT_TABS=""
     return 0
   fi
+  # Last time's answer was no tabs: offer the standard set again.
+  [[ -n "$DEFAULT_TABS" ]] || DEFAULT_TABS="$STANDARD_TABS"
   say "The default set is:"
   local item
   local oldifs="$IFS"; IFS=','; local shown=($DEFAULT_TABS); IFS="$oldifs"
@@ -2230,10 +2331,11 @@ stage_herdr() {
   say "herdr runs your terminals in a background server: one workspace per repo, tabs"
   say "and panes inside, and a sidebar showing which agents are working, idle or"
   say "waiting for you. Closing Ghostty never stops them."
-  note "terminal-notifier delivers herdr's desktop notifications (see the notifications stage)."
-  note "A small herdr plugin can also give every new workspace and worktree the same"
-  note "set of tabs. You choose the tabs at the end of this stage."
-  brew_formulae herdr terminal-notifier
+  note "terminal-notifier delivers herdr's desktop notifications (see the macos stage)."
+  printf '\n'
+  stage_tools herdr
+  free_ctrl_space
+  printf '\n'
   install_file "$HOME/.config/herdr/config.toml" < <(herdr_config)
   journal_undo undo_herdr
   say "Validating:"
@@ -2246,7 +2348,6 @@ stage_herdr() {
   fi
   printf '\n'
   say "Default tab layout plugin..."
-  ask_default_tabs
   if [[ -n "$DEFAULT_TABS" ]]; then
     write_worktree_tabs_plugin
   else
@@ -2256,8 +2357,10 @@ stage_herdr() {
     else
       note "new workspaces keep herdr's single starting tab"
     fi
-    SKIPPED+=("default tabs on new workspaces: re-run this stage to turn them on")
+    SKIPPED+=("default tabs on new workspaces: bash $SCRIPT_PATH --only choices,herdr")
   fi
+  printf '\n'
+  agent_integrations
   pause
 }
 
@@ -2277,7 +2380,8 @@ undo_herdr() {
   return 0
 }
 
-stage_agents() {
+# agent_integrations: herdr's hooks and skill for Claude Code and Codex.
+agent_integrations() {
   say "For each agent, herdr can install:"
   step "a hook, so herdr can resume the exact conversation after a reboot or server restart"
   step "a skill (Claude), so the agent can drive herdr itself: start the dev server in a"
@@ -2301,7 +2405,7 @@ stage_agents() {
   printf '\n'
   say "Codex"
   if ! command -v codex >/dev/null 2>&1; then
-    note "Codex isn't installed. Optional: brew install --cask codex, then: bash $SCRIPT_PATH --from 15"
+    note "Codex isn't installed. Optional: brew install --cask codex, then: bash $SCRIPT_PATH --only herdr"
   elif herdr_integration_current codex; then
     ok "herdr hook installed and current"
   elif confirm "Install herdr's Codex hook? (~/.codex config files are backed up first)"; then
@@ -2312,26 +2416,9 @@ stage_agents() {
     SKIPPED+=("herdr Codex hook: herdr integration install codex")
   fi
   note "Agent sessions that are already running need a restart to pick these up."
-  pause
 }
 
-stage_ghostty_herdr() {
-  say "Every new Ghostty window (launch, Dock click, Cmd-N, quick terminal) follows one rule:"
-  note "  herdr not open in any window   → the window attaches herdr"
-  note "  herdr already open elsewhere   → plain shell. So Cmd-N is your 'without herdr' shortcut"
-  note "  detach herdr with prefix q     → the window stays open as a plain shell; type herdr to go back"
-  printf '\n'
-  note "Why the old setup needed typing 'herdr': closing a Mac app's last window doesn't quit"
-  note "the app, and Ghostty's initial-command only covered the first window after launch."
-  printf '\n'
-  write_ghostty_config
-  step "Press Cmd-Shift-, (comma) to reload Ghostty's config."
-  step "Try it: press Cmd-N. With herdr open here, the new window is a plain shell. Cmd-W closes it."
-  note "Later, close every Ghostty window and click the Dock icon: it opens straight into herdr."
-  pause
-}
-
-stage_permissions() {
+stage_macos() {
   say "Notifications, so an agent in another tab or repo pings you when it finishes or needs you."
   note "herdr posts them through terminal-notifier, so they show even while Ghostty is in front."
   note "It stays quiet about the tab you're already looking at."
@@ -2408,11 +2495,11 @@ stage_statusline() {
   if statusline_configured; then
     ok "already set up in ~/.claude/settings.json"
   elif ! confirm "Set up this status line?"; then
-    note "Skipped. Add it later with: bash $SCRIPT_PATH --from 18"
+    note "Skipped. Add it later with: bash $SCRIPT_PATH --only statusline"
     pause
     return 0
   fi
-  brew_formulae jq
+  stage_tools statusline
   install_file "$STATUSLINE" < <(statusline_script)
   chmod +x "$STATUSLINE"
   local settings="$HOME/.claude/settings.json"
@@ -2426,7 +2513,31 @@ stage_statusline() {
 
 # ── Tour ──────────────────────────────────────────────────────────────────
 
-stage_tour_launch() {
+# The tour's sections, in order. Each is one screen.
+TOUR=(
+  "tour_launch:Land in herdr, one workspace per repo"
+  "tour_navigation:Moving around"
+  "tour_agents:Run and juggle agents"
+  "tour_tabs:Tabs inside one repo"
+  "tour_nvim:Neovim next to your agent"
+  "tour_review:Claude edits, you review"
+  "tour_statusline:Reading the status line"
+  "tour_resume:Close anything, pick up later"
+  "tour_habits:Daily habits"
+)
+
+stage_tour() {
+  local entry i=0
+  for entry in "${TOUR[@]}"; do
+    i=$((i + 1))
+    _clear
+    printf '\n%s%s▸ Stage %s/%s · Tour %s/%s · %s%s\n' \
+      "$BOLD" "$BLUE" "$_STAGE_INDEX" "$TOTAL_STAGES" "$i" "${#TOUR[@]}" "${entry#*:}" "$RESET"
+    "${entry%%:*}"
+  done
+}
+
+tour_launch() {
   if [[ -z "${HERDR_ENV:-}" ]]; then
     say "The tour runs inside herdr, so it survives closing Ghostty (you'll try that in step 8)."
     printf 'bash %q --tour' "$SCRIPT_PATH" | pbcopy
@@ -2452,7 +2563,7 @@ stage_tour_launch() {
   pause "Press Enter for step 2 of 9"
 }
 
-stage_tour_navigation() {
+tour_navigation() {
   say "Everything nests: Ghostty window › workspace (a repo) › tab › pane › popup."
   printf '\n'
   note "  Workspace  prefix m open repo · prefix , / . prev/next · prefix w list"
@@ -2473,7 +2584,7 @@ stage_tour_navigation() {
   pause "Press Enter for step 3 of 9"
 }
 
-stage_tour_agents() {
+tour_agents() {
   say "Agents are ordinary programs in panes. herdr reads each one's state and shows it"
   say "in the sidebar: working, waiting for you, or idle."
   printf '\n'
@@ -2499,7 +2610,7 @@ stage_tour_agents() {
   pause "Press Enter for step 4 of 9"
 }
 
-stage_tour_tabs() {
+tour_tabs() {
   say "Inside one repo, give each kind of work its own tab so every view stays put:"
   printf '\n'
   note "  1 agents       Claude / Codex sessions"
@@ -2522,7 +2633,7 @@ stage_tour_tabs() {
   pause "Press Enter for step 5 of 9"
 }
 
-stage_tour_nvim() {
+tour_nvim() {
   say "Recommended layout for coding with an agent: editor and agent side by side."
   printf '\n'
   note "  ┌─────────── nvim (60%) ───────────┬──── claude (40%) ────┐"
@@ -2544,7 +2655,7 @@ stage_tour_nvim() {
   pause "Press Enter for step 6 of 9"
 }
 
-stage_tour_review() {
+tour_review() {
   say "Let Claude change one file, then review it before anything gets committed."
   printf '\n'
   step "In repo A's Claude (code tab): 'Add a one-line comment at the top of README.md saying"
@@ -2562,10 +2673,10 @@ stage_tour_review() {
   pause "Press Enter for step 7 of 9"
 }
 
-stage_tour_statusline() {
+tour_statusline() {
   if ! statusline_configured; then
     note "No status line set up, so there's nothing to show here."
-    note "Add it any time: bash $SCRIPT_PATH --from 18"
+    note "Add it any time: bash $SCRIPT_PATH --only statusline"
     pause "Press Enter for step 8 of 9"
     return 0
   fi
@@ -2585,7 +2696,7 @@ stage_tour_statusline() {
   pause "Press Enter for step 8 of 9"
 }
 
-stage_tour_resume() {
+tour_resume() {
   say "herdr keeps everything in a background server, so closing is safe at every level:"
   printf '\n'
   step "One agent: /exit in Claude. The pane stays a shell. Later in that pane or repo:"
@@ -2603,7 +2714,7 @@ stage_tour_resume() {
   pause "Press Enter for step 9 of 9"
 }
 
-stage_tour_habits() {
+tour_habits() {
   say "Habits that make this setup pay off:"
   printf '\n'
   note "• One workspace per repo, same tab order everywhere (agents, code, dev, review)."
@@ -2657,7 +2768,7 @@ Open any time with `keys`. **prefix** = Ctrl-Space: press, release, then the key
 ## Tabs and panes
 
 New workspaces and worktrees open with a standard set of tabs. Change the list by
-re-running the wizard's herdr stage, or edit
+re-running the wizard with `--only choices,herdr`, or edit
 `~/.herdr/plugins/worktree-tabs/apply-tab-layout.sh`.
 
 | Keys | Action |
@@ -2732,101 +2843,133 @@ EOF
 
 # ── Runner ────────────────────────────────────────────────────────────────
 
+# One stage for the mandatory work, one per group of tools, then the tour.
+# Each entry is "name:title". Flags take the name; stage_<name> runs it.
 STAGES=(
-  "stage_preflight:Preflight"
-  "stage_install_ghostty:Install Ghostty, choose icons or plain text"
-  "stage_ghostty_config:Ghostty config"
-  "stage_move_into_ghostty:Move into Ghostty"
-  "stage_free_ctrl_space:Free up Ctrl-Space for herdr"
-  "stage_toolbelt:CLI toolbelt"
-  "stage_starship:Starship prompt"
-  "stage_shell:Shell: history search, aliases, project jumper"
-  "stage_git_diffs:Git diffs: delta and difftastic"
-  "stage_lazygit:lazygit"
-  "stage_github:GitHub CLI and gh-dash"
-  "stage_neovim:Neovim + LazyVim"
-  "stage_yazi:yazi file manager"
-  "stage_herdr:herdr"
-  "stage_agents:Connect herdr to Claude Code and Codex"
-  "stage_ghostty_herdr:Ghostty: open herdr automatically"
-  "stage_permissions:macOS permissions: notifications and quick terminal"
-  "stage_statusline:Claude Code status line (optional)"
-  "stage_tour_launch:Tour 1/9 · Land in herdr, one workspace per repo"
-  "stage_tour_navigation:Tour 2/9 · Moving around"
-  "stage_tour_agents:Tour 3/9 · Run and juggle agents"
-  "stage_tour_tabs:Tour 4/9 · Tabs inside one repo"
-  "stage_tour_nvim:Tour 5/9 · Neovim next to your agent"
-  "stage_tour_review:Tour 6/9 · Claude edits, you review"
-  "stage_tour_statusline:Tour 7/9 · Reading the status line"
-  "stage_tour_resume:Tour 8/9 · Close anything, pick up later"
-  "stage_tour_habits:Tour 9/9 · Daily habits"
+  "choices:Your choices"
+  "install:Install everything"
+  "ghostty:Ghostty"
+  "herdr:herdr and your agents"
+  "macos:macOS permissions: notifications and quick terminal"
+  "prompt:Starship prompt"
+  "shell:Shell: tools, history search, aliases, project jumper"
+  "editor:Neovim + LazyVim"
+  "review:Reviewing diffs: delta, difftastic and lazygit"
+  "yazi:yazi file manager"
+  "github:GitHub CLI and gh-dash"
+  "statusline:Claude Code status line (optional)"
+  "tour:Guided tour"
 )
 TOTAL_STAGES=${#STAGES[@]}
-TOUR_START=19
 
 usage() {
   cat <<EOF
-usage: bash $(basename "$0") [--from N | --only N,N | --skip N,N | --tour | --list | --revert [--restore]]
+usage: bash $(basename "$0") [--from NAME | --only NAME,NAME | --skip NAME,NAME | --tour | --list | --revert [--restore]]
 
-  (no flags)  run every stage; finished stages report "already done" and move on
-  --from N    start at stage N (see --list)
-  --only N,N  run just these stages, e.g. --only 14,16,17
-  --skip N,N  run everything except these stages, e.g. --skip 11,13 (no GitHub, no yazi)
-  --tour      only the guided tour (stages $TOUR_START-$TOTAL_STAGES)
-  --list      print the stages and exit
-  --revert    undo every config change the wizard made, back to how it was before
-              (installed tools stay). Nothing is deleted: what it takes away is
-              moved to ~/.ghostty-herdr-wizard/reverted/
+  (no flags)       run every stage; finished stages report "already done" and move on
+  --from NAME      start at this stage, e.g. --from editor (names: see --list)
+  --only NAME,...  run just these stages, e.g. --only herdr,macos
+  --skip NAME,...  run everything except these, e.g. --skip yazi,github
+  --tour           only the guided tour (same as --only tour)
+  --list           print the stage names and exit
+  --revert         undo every config change the wizard made, back to how it was before
+                   (installed tools stay). Nothing is deleted: what it takes away is
+                   moved to ~/.ghostty-herdr-wizard/reverted/
   --revert --restore
-              move what the last --revert took away back into place
+                   move what the last --revert took away back into place
 EOF
+}
+
+# stage_known NAME: true if NAME is a stage.
+stage_known() {
+  local entry
+  for entry in "${STAGES[@]}"; do
+    [[ "${entry%%:*}" == "$1" ]] && return 0
+  done
+  return 1
+}
+
+# stage_list NAMES: check a comma-separated list of stage names and print it as
+# ",a,b," for matching. An unknown name is reported, and fails.
+stage_list() {
+  [[ -n "$1" && "$1" != *,,* && "$1" != ,* && "$1" != *, ]] || return 2
+  local name entry bad=0 oldifs="$IFS"
+  IFS=','; local names=($1); IFS="$oldifs"
+  for name in "${names[@]}"; do
+    stage_known "$name" && continue
+    printf 'unknown stage "%s". The stages are:' "$name" >&2
+    for entry in "${STAGES[@]}"; do printf ' %s' "${entry%%:*}" >&2; done
+    printf '\n' >&2
+    bad=1
+  done
+  (( bad == 0 )) || return 2
+  printf ',%s,' "$1"
+}
+
+# What this run does. MODE is run, list, revert, restore or help; for a run,
+# FROM, ONLY and SKIP pick the stages (see stage_wanted).
+MODE=run
+FROM=""
+ONLY=""
+SKIP=""
+
+# parse_args ARGS...: set MODE, FROM, ONLY and SKIP. Returns 2 on bad usage.
+parse_args() {
+  case "${1:-}" in
+    "") ;;
+    --tour) ONLY=",tour," ;;
+    --from)
+      [[ "${2:-}" != *,* ]] && stage_list "${2:-}" >/dev/null || return 2
+      FROM="$2"
+      ;;
+    --only) ONLY=$(stage_list "${2:-}") || return 2 ;;
+    --skip) SKIP=$(stage_list "${2:-}") || return 2 ;;
+    --list) MODE=list ;;
+    --revert)
+      case "${2:-}" in
+        "") MODE=revert ;;
+        --restore) MODE=restore ;;
+        *) return 2 ;;
+      esac
+      ;;
+    -h | --help) MODE=help ;;
+    *) return 2 ;;
+  esac
+}
+
+# stage_wanted NAME: true if this run includes the stage NAME.
+stage_wanted() {
+  local entry
+  if [[ -n "$FROM" ]]; then
+    # Whichever comes first in the list: NAME (too early) or FROM.
+    for entry in "${STAGES[@]}"; do
+      [[ "${entry%%:*}" == "$1" || "${entry%%:*}" == "$FROM" ]] && break
+    done
+    [[ "${entry%%:*}" == "$FROM" ]] || return 1
+  fi
+  [[ -z "$ONLY" || "$ONLY" == *",$1,"* ]] && [[ "$SKIP" != *",$1,"* ]]
 }
 
 # Sourced (by the tests) rather than run: stop here with the library loaded.
 [[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
 
-FROM=1
-ONLY=""
-SKIP=""
-case "${1:-}" in
-  "") ;;
-  --tour) FROM=$TOUR_START ;;
-  --from)
-    FROM="${2:-}"
-    if ! [[ "$FROM" =~ ^[0-9]+$ ]] || (( FROM < 1 || FROM > TOTAL_STAGES )); then
-      usage
-      exit 2
-    fi
-    ;;
-  --only)
-    ONLY=",${2:-},"
-    if ! [[ "$ONLY" =~ ^,[0-9]+(,[0-9]+)*,$ ]]; then
-      usage
-      exit 2
-    fi
-    ;;
-  --skip)
-    SKIP=",${2:-},"
-    if ! [[ "$SKIP" =~ ^,[0-9]+(,[0-9]+)*,$ ]]; then
-      usage
-      exit 2
-    fi
-    ;;
-  --list)
+if ! parse_args "$@"; then
+  usage >&2
+  exit 2
+fi
+case "$MODE" in
+  help) usage; exit 0 ;;
+  list)
     i=0
     for entry in "${STAGES[@]}"; do
       i=$((i + 1))
-      printf '%3d  %s\n' "$i" "${entry#*:}"
+      printf '%3d  %-11s %s\n' "$i" "${entry%%:*}" "${entry#*:}"
     done
     exit 0
     ;;
-  --revert)
+  revert | restore)
     printf '\n%s%s  Revert%s\n\n' "$BOLD" "$BLUE" "$RESET"
-    case "${2:-}" in
-      "") revert_all ;;
-      --restore) revert_restore ;;
-      *) usage; exit 2 ;;
-    esac
+    if [[ "$MODE" == revert ]]; then revert_all; else revert_restore; fi
     if (( ${#SKIPPED[@]} )); then
       printf '\n'; warn "still to do by hand:"
       for s in "${SKIPPED[@]}"; do note "  - $s"; done
@@ -2834,23 +2977,20 @@ case "${1:-}" in
     printf '\n'
     exit 0
     ;;
-  -h | --help) usage; exit 0 ;;
-  *) usage; exit 2 ;;
 esac
 
+preflight
 journal_init
 banner "Ghostty + herdr terminal for coding agents"
 # Every stage writes through the journaling helpers, so --revert can undo it.
 JOURNALING=1
 for entry in "${STAGES[@]}"; do
-  if (( _STAGE_INDEX + 1 < FROM )) ||
-    [[ -n "$ONLY" && "$ONLY" != *",$((_STAGE_INDEX + 1)),"* ]] ||
-    [[ "$SKIP" == *",$((_STAGE_INDEX + 1)),"* ]]; then
+  if ! stage_wanted "${entry%%:*}"; then
     _STAGE_INDEX=$((_STAGE_INDEX + 1))
     continue
   fi
   stage "${entry#*:}"
-  "${entry%%:*}"
+  "stage_${entry%%:*}"
 done
 JOURNALING=0
 

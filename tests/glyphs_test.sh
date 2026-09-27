@@ -136,29 +136,40 @@ test_ghostty_stage_follows_the_saved_choice() {
   new_home
   mkdir -p "$STATE"
   printf 'GLYPHS=off\n' > "$STATE/choices.env"
-  cli --only 3
-  check "[[ -f '$H/.config/ghostty/config' ]]" "stage 3 wrote the Ghostty config"
+  cli --only ghostty
+  check "[[ -f '$H/.config/ghostty/config' ]]" "ghostty stage wrote the Ghostty config"
   check "! grep -q 'Nerd Font' '$H/.config/ghostty/config'" "glyphs off: Ghostty isn't pointed at a Nerd Font"
   printf 'GLYPHS=on\n' > "$STATE/choices.env"
-  cli --only 3
+  cli --only ghostty
   check "grep -q '^font-family = JetBrainsMono Nerd Font' '$H/.config/ghostty/config'" "glyphs on: Ghostty uses the Nerd Font"
   cleanup
 }
 
+# The choices stage asks, the install stage follows it.
 test_choosing_plain_text_saves_it_and_skips_the_font() {
   new_home
-  ( # subshell: the fake brew on PATH never outlives this test
+  ( # subshell: the fake brew and bat on PATH never outlive this test
     fake_brew
-    printf '\n2\n\n\n' > "$T/answers"
-    CLI_INPUT="$T/answers" cli --only 2
+    # A bat whose themes are already there, so the install stage downloads nothing.
+    mkdir -p "$T/bat/themes"
+    touch "$T/bat/themes/Catppuccin Mocha.tmTheme" "$T/bat/themes/Catppuccin Latte.tmTheme"
+    printf '#!/bin/sh\n[ "$1" = --config-dir ] && echo "%s/bat"\nexit 0\n' "$T" > "$T/bin/bat"
+    chmod +x "$T/bin/bat"
+    # banner, plain text, projects folder (Enter), don't create it, no tabs, done
+    printf '\n2\n\nn\nn\n\n' > "$T/answers"
+    CLI_INPUT="$T/answers" cli --only choices
     check "grep -qx 'GLYPHS=off' '$STATE/choices.env'" "answer 2 saves plain text"
-    check "! grep -q 'font-jetbrains-mono-nerd-font' '$T/brew.log' 2>/dev/null" "plain text: no Nerd Font install"
-    printf '\n\n\n' > "$T/answers"
-    CLI_INPUT="$T/answers" cli --only 2
+    cli --only install
+    check "grep -q 'formula' '$T/brew.log'" "the install stage ran brew"
+    check "! grep -q 'font-jetbrains-mono-nerd-font' '$T/brew.log'" "plain text: no Nerd Font install"
+    # banner, don't reuse, Enter for icons (keeps plain text), Enter, n, n, done
+    printf '\nn\n\n\nn\nn\n\n' > "$T/answers"
+    CLI_INPUT="$T/answers" cli --only choices
     check "grep -qx 'GLYPHS=off' '$STATE/choices.env'" "Enter on a re-run keeps the saved answer"
-    printf '\n1\n\n\n' > "$T/answers"
-    CLI_INPUT="$T/answers" cli --only 2
+    printf '\nn\n1\n\nn\nn\n\n' > "$T/answers"
+    CLI_INPUT="$T/answers" cli --only choices
     check "grep -qx 'GLYPHS=on' '$STATE/choices.env'" "answer 1 saves icons"
+    cli --only install
     check "grep -q 'font-jetbrains-mono-nerd-font' '$T/brew.log'" "icons: installs the Nerd Font"
     printf '%s %s\n' "$PASSES" "$FAILS" > "$T/tally"
   )

@@ -50,11 +50,13 @@ wizard() {
   ) < "$T/answers" > "$T/out" 2>&1
 }
 # cli ARGS...: run the real script as a user would. Enter for every pause, or
-# the answers in the file CLI_INPUT names.
+# the answers in the file CLI_INPUT names. It runs as if inside Ghostty and
+# outside herdr, so the ghostty stage never opens Ghostty or fills the clipboard.
 cli() {
   local i
   for i in 1 2 3 4 5 6 7 8 9 10; do printf '\n'; done > "$T/enter"
-  HOME="$H" GHW_TTY="$T/tty" bash "$WIZARD" "$@" < "${CLI_INPUT:-$T/enter}" > "$T/out" 2>&1
+  HOME="$H" GHW_TTY="$T/tty" TERM_PROGRAM=ghostty HERDR_ENV='' \
+    bash "$WIZARD" "$@" < "${CLI_INPUT:-$T/enter}" > "$T/out" 2>&1
 }
 # fake_brew: put a brew on PATH that only logs its arguments to $T/brew.log.
 fake_brew() {
