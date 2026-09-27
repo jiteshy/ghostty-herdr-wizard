@@ -1253,7 +1253,8 @@ EOF
 # draws it when installed; before that (the choices stage runs before the
 # install stage) it's drawn here, to the same design.
 prompt_preview() {
-  local tmp out="" here branch
+  # bash 3.2 keeps the backslash of a quoted \~ replacement, so ~ goes in a variable.
+  local tmp out="" here branch tilde='~'
   if command -v starship >/dev/null 2>&1; then
     tmp=$(mktemp "${TMPDIR:-/tmp}/ghw-starship.XXXXXX")
     starship_config "$1" > "$tmp"
@@ -1269,7 +1270,7 @@ prompt_preview() {
   fi
   # The last three folders, as starship's truncation_length = 3 shows them.
   here=$(awk -F/ '{ n = NF - ($1 == ""); if (n > 3) print "…/" $(NF-2) "/" $(NF-1) "/" $NF; else print }' \
-    <<<"${PWD/#$HOME/\~}")
+    <<<"${PWD/#$HOME/$tilde}")
   branch=$(git branch --show-current 2>/dev/null || true)
   case "$1" in
     pure)
@@ -1522,7 +1523,8 @@ ask_theme() {
   say "2) always dark"
   note "   Mocha, whatever macOS is set to"
   say "3) leave my themes alone"
-  note "   the wizard sets no colours (ones it set before stay until --revert)"
+  note "   Ghostty and herdr get no theme. Neovim and yazi colours from"
+  note "   an earlier run stay until --revert"
   printf '\n'
   printf '  %schoice [%s]:%s ' "$BOLD" "$current" "$RESET"
   answer=""
@@ -1545,9 +1547,9 @@ ask_theme() {
 # first. Sets and saves PROMPT; Enter keeps the current answer (pure on a
 # first run). tokyo night needs the Nerd Font, so it's only offered with icons.
 ask_prompt() {
-  local current=1 answer none=3
-  [[ "$GLYPHS" == on ]] || none=2
-  case "$(prompt_style)" in tokyo) current=2 ;; none) current=$none ;; esac
+  local current=1 answer leave_opt=3
+  [[ "$GLYPHS" == on ]] || leave_opt=2
+  case "$(prompt_style)" in tokyo) current=2 ;; none) current=$leave_opt ;; esac
   say "${BOLD}Prompt${RESET}"
   note "Two prompts, both showing just the folder and the git branch:"
   printf '\n'
@@ -1564,13 +1566,13 @@ ask_prompt() {
   fi
   say "1) pure  (suggested)"
   [[ "$GLYPHS" == on ]] && say "2) tokyo night"
-  say "$none) leave my prompt alone"
+  say "$leave_opt) leave my prompt alone"
   printf '\n'
   printf '  %schoice [%s]:%s ' "$BOLD" "$current" "$RESET"
   answer=""
   read -r answer || true
   answer=${answer:-$current}
-  if [[ "$answer" == "$none" ]]; then PROMPT=none
+  if [[ "$answer" == "$leave_opt" ]]; then PROMPT=none
   elif [[ "$answer" == 2 ]]; then PROMPT=tokyo
   else PROMPT=pure
   fi
@@ -1765,13 +1767,19 @@ stage_ghostty() {
   else
     warn "Ghostty doesn't list 'JetBrainsMono Nerd Font' yet. It may appear after Ghostty restarts."
   fi
-  if [[ "$THEME" == none ]]; then
-    :
-  elif "$GHOSTTY_BIN" +list-themes 2>/dev/null | grep "Catppuccin Mocha" >/dev/null; then
-    ok "Catppuccin themes found"
-  else
-    warn "Couldn't confirm the 'Catppuccin Mocha' theme name. Check with: ghostty +list-themes"
-  fi
+  local wanted=() name themes
+  case "$THEME" in
+    auto) wanted=("Catppuccin Mocha" "Catppuccin Latte") ;;
+    dark) wanted=("Catppuccin Mocha") ;;
+  esac
+  themes=$("$GHOSTTY_BIN" +list-themes 2>/dev/null || true)
+  for name in ${wanted[@]+"${wanted[@]}"}; do
+    if grep -q "$name" <<<"$themes"; then
+      ok "Ghostty has the '$name' theme"
+    else
+      warn "Couldn't confirm the '$name' theme name. Check with: ghostty +list-themes"
+    fi
+  done
   printf '\n'
   say "Every new Ghostty window (launch, Dock click, Cmd-N, quick terminal) follows one rule:"
   note "  herdr not open in any window   → the window attaches herdr"
@@ -2326,7 +2334,7 @@ stage_yazi() {
   say "Three-column file browser with code, image and PDF previews."
   say "Opens with herdr prefix then f, or y in any shell."
   stage_tools yazi
-  local flavors_ok=true flavour flavours=""
+  local flavour flavours="" missing=()
   case "$THEME" in
     auto) flavours="catppuccin-mocha catppuccin-latte" ;;
     dark) flavours="catppuccin-mocha" ;;
@@ -2337,16 +2345,18 @@ stage_yazi() {
     else
       cmd "ya pkg add yazi-rs/flavors:$flavour"
       if ! ya pkg add "yazi-rs/flavors:$flavour"; then
-        flavors_ok=false
+        missing+=("$flavour")
         warn "couldn't install yazi flavour $flavour"
       fi
     fi
   done
-  local theme; theme=$(yazi_theme)
-  if ! $flavors_ok; then
-    SKIPPED+=("yazi Catppuccin flavours: ya pkg add yazi-rs/flavors:catppuccin-mocha")
-  elif [[ -n "$theme" ]]; then
-    install_file "$HOME/.config/yazi/theme.toml" <<<"$theme"
+  local theme_toml; theme_toml=$(yazi_theme)
+  if (( ${#missing[@]} > 0 )); then
+    for flavour in "${missing[@]}"; do
+      SKIPPED+=("yazi Catppuccin flavour: ya pkg add yazi-rs/flavors:$flavour")
+    done
+  elif [[ -n "$theme_toml" ]]; then
+    install_file "$HOME/.config/yazi/theme.toml" <<<"$theme_toml"
   fi
   pause
 }

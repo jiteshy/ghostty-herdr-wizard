@@ -178,7 +178,7 @@ test_one_numbered_question_previews_both_prompts_in_this_folder() {
   wizard 'GLYPHS=on; PATH=/usr/bin:/bin; cd "$HOME/app"; ask_prompt; printf "RESULT=%s\n" "$PROMPT"'
   check "grep -q '1) pure' '$T/out' && grep -q '2) tokyo night' '$T/out'" "offers both prompts"
   check "grep -q '3) leave my prompt alone' '$T/out'" "offers leaving the prompt alone"
-  check "[[ '$(grep -c '~/app main' "$T/out")' -ge 1 ]]" "pure preview shows this folder and branch"
+  check "grep -q '^ *~/app main' '$T/out'" "pure preview shows this folder and branch, from ~"
   check "grep -q '❯' '$T/out'" "pure preview shows its ❯"
   check "[[ '$(grep -c '~/app.*main' "$T/out")' -ge 2 ]]" "tokyo night preview too"
   check "grep -qx 'RESULT=pure' '$T/out'" "Enter picks pure"
