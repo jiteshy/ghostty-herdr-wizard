@@ -74,8 +74,16 @@ open_url() {
   } >/dev/null 2>&1 || warn "couldn't open a browser, so visit it manually: $url"
 }
 
-# pause "msg" waits for the human to confirm they've done the manual part.
+# pause "msg" is the breather between steps: it waits for Enter, unless --yes
+# (YES=1) made pauses no-ops for a re-run.
 pause() {
+  [[ "${YES:-0}" == 1 ]] && return 0
+  wait_for_user "$@"
+}
+
+# wait_for_user "msg" waits for the human to confirm they've done the manual
+# part. Unlike pause, --yes never skips it: only the human can do that part.
+wait_for_user() {
   printf '  %s%s%s ' "$DIM" "${1:-Press Enter to continue}" "$RESET"
   read -r _ || true
 }
@@ -297,6 +305,14 @@ esac
 
 ok()  { printf '  %s✓%s %s\n' "$GREEN" "$RESET" "$1"; }
 cmd() { printf '  %s$ %s%s\n' "$DIM" "$*" "$RESET"; }
+
+# ask_or_yes "question": confirm, except that --yes answers yes. Only for a
+# question about the setup itself; a check of what the user sees, or replacing
+# their file, still asks.
+ask_or_yes() {
+  [[ "$YES" == 1 ]] && return 0
+  confirm "$1"
+}
 
 # run CMD...: show a command and run it. A failure is recorded for the closing
 # summary instead of aborting, so one flaky install doesn't sink the rest.
@@ -1604,6 +1620,10 @@ stage_choices() {
     say "Last time's answers:"
     show_choices
     printf '\n'
+    if [[ "$YES" == 1 ]]; then
+      ok "using them (--yes)"
+      return 0
+    fi
     if confirm "Use last time's answers?"; then
       return 0
     fi
@@ -1612,7 +1632,27 @@ stage_choices() {
   ask_tools
   if selected jumper; then ask_projects_dir; fi
   ask_default_tabs
-  pause
+}
+
+# plan_gate: after the choices, the plan and the run's one confirmation.
+# Returns 1 when the user says no. With no stage after choices in this run
+# there is nothing to plan, so it only pauses. --yes shows the plan and goes.
+plan_gate() {
+  local entry later=false
+  for entry in "${STAGES[@]}"; do
+    [[ "${entry%%:*}" != choices ]] && stage_runs "${entry%%:*}" && later=true
+  done
+  if ! $later; then
+    pause
+    return 0
+  fi
+  show_plan
+  printf '\n'
+  [[ "$YES" == 1 ]] && return 0
+  confirm "Go?" && return 0
+  printf '\n'
+  note "No files changed. Your answers are saved, so the next run can reuse them."
+  return 1
 }
 
 # cluster_formulae KEY: the Homebrew formulae the group KEY brings. The Nerd
@@ -1696,7 +1736,7 @@ stage_install() {
   else
     warn "Xcode command line tools missing. A macOS dialog will open."
     run xcode-select --install
-    pause "Finish the install in that dialog, then press Enter"
+    wait_for_user "Finish the install in that dialog, then press Enter"
   fi
   if [[ -d /Applications/Ghostty.app ]]; then
     ok "Ghostty already in /Applications"
@@ -1741,10 +1781,12 @@ stage_ghostty() {
   if ! in_ghostty; then
     say "The rest of the setup needs to run inside Ghostty so you can check how it looks."
     open -a Ghostty || warn "couldn't open Ghostty; open it from /Applications"
-    printf 'bash %q --from ghostty' "$SCRIPT_PATH" | pbcopy
+    local yes=""
+    [[ "$YES" == 1 ]] && yes=" --yes"
+    printf 'bash %q%s --from ghostty' "$SCRIPT_PATH" "$yes" | pbcopy
     step "If macOS asks whether to open Ghostty, click Open."
     step "In the Ghostty window, press Cmd-V then Enter (the re-run command is on your clipboard):"
-    note "bash $SCRIPT_PATH --from ghostty"
+    note "bash $SCRIPT_PATH$yes --from ghostty"
     printf '\n'
     note "This window's part is done. You can close it."
     exit 0
@@ -1780,7 +1822,7 @@ free_ctrl_space() {
     step "Untick 'Select the previous input source' (^Space)."
     step "Untick 'Select next source in Input menu' (^⌥Space) too."
     step "Click Done."
-    pause "Press Enter when done"
+    wait_for_user "Press Enter when done"
     if ctrl_space_taken; then
       warn "macOS still reports Ctrl-Space as taken. If you only have one input source it may not matter."
       SKIPPED+=("confirm Ctrl-Space is free: System Settings → Keyboard → Keyboard Shortcuts → Input Sources")
@@ -2007,13 +2049,7 @@ stage_review() {
   note "Opens with herdr prefix then d, or lg in any shell."
   stage_tools review
   printf '\n'
-  local lg_dir
-  if lg_dir=$(lazygit --print-config-dir 2>/dev/null) && [[ -n "$lg_dir" ]]; then
-    install_file "$lg_dir/config.yml" < <(lazygit_config)
-  else
-    warn "couldn't find lazygit's config directory"
-    SKIPPED+=("lazygit config not written")
-  fi
+  install_file "$(lazygit_dir)/config.yml" < <(lazygit_config)
   printf '\n'
   install_hunk
   pause
@@ -2034,6 +2070,14 @@ placement = "overlay"
 EOF
 }
 
+# hunk_config_dir: herdr-hunk's config folder, also before it is installed.
+hunk_config_dir() {
+  local dir
+  dir=$(herdr plugin config-dir "$HUNK_ID" 2>/dev/null) || dir=""
+  [[ -n "$dir" ]] || dir="$HOME/.config/herdr/plugins/config/$HUNK_ID"
+  printf '%s' "$dir"
+}
+
 # install_hunk: herdr-hunk, its keybindings and its config, if Node allows.
 #
 # Its setup-keys writes the keys into herdr's config.toml, which the herdr stage
@@ -2043,7 +2087,7 @@ EOF
 # unchanged, and --revert neither blames the user for them nor loses the
 # pre-wizard original.
 install_hunk() {
-  local gate plugins dir
+  local gate plugins
   if ! gate=$(node_gate); then
     warn "herdr-hunk skipped: it $(head -n1 <<< "$gate")"
     note "  $(sed -n 2p <<< "$gate" | sed 's/^ *//')"
@@ -2081,9 +2125,7 @@ install_hunk() {
   fi
 
   if [[ -n "$DEFAULT_TABS" ]]; then
-    dir=$(herdr plugin config-dir "$HUNK_ID" 2>/dev/null) || dir=""
-    [[ -n "$dir" ]] || dir="$HOME/.config/herdr/plugins/config/$HUNK_ID"
-    install_file "$dir/config.toml" < <(hunk_config)
+    install_file "$(hunk_config_dir)/config.toml" < <(hunk_config)
   fi
 
   journal_undo undo_herdr
@@ -2105,7 +2147,7 @@ stage_github() {
     step "Copy the code, press Enter, paste it on the GitHub page, click Authorize."
     step "If asked 'Authenticate Git with your GitHub credentials?': Yes lets git push over HTTPS"
     step "through gh. Answer No if you already use SSH keys or another credential helper."
-    pause "Press Enter to start the login"
+    wait_for_user "Press Enter to start the login"
     run gh auth login --hostname github.com --git-protocol https --web
   fi
   if gh extension list 2>/dev/null | grep 'gh-dash' >/dev/null; then
@@ -2274,7 +2316,7 @@ EOF
     step "Press Space and pause: a menu of every command appears."
     step "Try Space Space (find file), Space / (search text), then gd on a symbol (go to definition)."
     step "Quit with :qa"
-    pause "Press Enter when Neovim opened cleanly"
+    wait_for_user "Press Enter when Neovim opened cleanly"
   else
     pause
   fi
@@ -2781,7 +2823,7 @@ agent_integrations() {
   say "Claude Code"
   if herdr_integration_current claude; then
     ok "herdr hook installed and current"
-  elif confirm "Install herdr's Claude Code hook? (~/.claude/settings.json is backed up first)"; then
+  elif ask_or_yes "Install herdr's Claude Code hook? (~/.claude/settings.json is backed up first)"; then
     json_track "$HOME/.claude/settings.json" run herdr integration install claude || true
   else
     SKIPPED+=("herdr Claude hook: herdr integration install claude")
@@ -2799,7 +2841,7 @@ agent_integrations() {
     note "Codex isn't installed. Optional: brew install --cask codex, then: bash $SCRIPT_PATH --only herdr"
   elif herdr_integration_current codex; then
     ok "herdr hook installed and current"
-  elif confirm "Install herdr's Codex hook? (~/.codex config files are backed up first)"; then
+  elif ask_or_yes "Install herdr's Codex hook? (~/.codex config files are backed up first)"; then
     # One install, tracked around both files it may write.
     track_file "$HOME/.codex/config.toml" \
       track_file "$HOME/.codex/hooks.json" run herdr integration install codex
@@ -2828,7 +2870,7 @@ stage_macos() {
     open_url "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
     step "Find terminal-notifier in the list, turn on 'Allow notifications', pick Banners (or"
     step "Alerts to keep them on screen until dismissed). Check Focus / Do Not Disturb is off."
-    pause "Press Enter when done"
+    wait_for_user "Press Enter when done"
     terminal-notifier -title "herdr" -message "Second try" -activate com.mitchellh.ghostty >/dev/null 2>&1 || true
     if ! confirm "Did this second banner appear?"; then
       notifications=false
@@ -2858,7 +2900,7 @@ stage_macos() {
     fi
   fi
   note "If Ctrl-\` does nothing yet, it starts working after the next Ghostty launch."
-  pause "Press Enter when done"
+  wait_for_user "Press Enter when done"
 }
 
 stage_statusline() {
@@ -2913,6 +2955,11 @@ TOUR=(
 
 stage_tour() {
   local entry i=0
+  # Its screens are for reading, which a --yes re-run would flash past.
+  if [[ "$YES" == 1 && "$ONLY" != *",tour,"* ]]; then
+    note "skipped with --yes. Replay it any time: bash $SCRIPT_PATH --tour"
+    return 0
+  fi
   for entry in "${TOUR[@]}"; do
     i=$((i + 1))
     # The first screen sits under the stage header; each later one gets its own.
@@ -3279,6 +3326,220 @@ STAGES=(
   "tour:Guided tour"
 )
 
+# ── What each stage writes ────────────────────────────────────────────────
+
+# stage_targets NAME: the paths the stage NAME writes with the current choices,
+# one "KIND PATH" per line. KIND is file (written whole), dir (a folder moved
+# aside and replaced whole) or edit (the wizard's block or keys go in; the rest
+# of the file stays). Stages with no file of their own print nothing.
+#
+# Keep it in step with the stage_ functions: a path a stage writes but this
+# leaves out is a file the badges and the plan never warn about.
+stage_targets() {
+  case "$1" in
+    ghostty)
+      printf 'file %s\n' "$HOME/.config/ghostty/config" "$LAUNCHER" ;;
+    herdr)
+      printf 'file %s\n' "$HOME/.config/herdr/config.toml"
+      [[ -n "$DEFAULT_TABS" ]] &&
+        printf 'file %s\n' "$HERDR_PLUGIN_DIR/herdr-plugin.toml" "$HERDR_PLUGIN_DIR/apply-tab-layout.sh"
+      printf 'file %s\n' "$HOME/.claude/skills/herdr/SKILL.md"
+      command -v claude >/dev/null 2>&1 && ! herdr_integration_current claude &&
+        printf 'edit %s\n' "$HOME/.claude/settings.json"
+      command -v codex >/dev/null 2>&1 && ! herdr_integration_current codex &&
+        printf 'edit %s\n' "$HOME/.codex/config.toml" "$HOME/.codex/hooks.json"
+      ;;
+    prompt)
+      printf 'file %s\n' "$HOME/.config/starship.toml" ;;
+    shell)
+      printf 'edit %s\n' "$HOME/.zprofile" "$HOME/.zshrc"
+      selected jumper && printf 'file %s\n' "$HOME/.local/bin/hproj"
+      printf 'file %s\n' "$CHEATSHEET"
+      ;;
+    editor)
+      local nvim="$HOME/.config/nvim"
+      if grep -q 'LazyVim/LazyVim' "$nvim/lua/config/lazy.lua" 2>/dev/null; then
+        # Rewritten whole, and only to add the language extras.
+        grep -q 'extras.lang.typescript' "$nvim/lua/config/lazy.lua" ||
+          printf 'file %s\n' "$nvim/lua/config/lazy.lua"
+        printf 'file %s\n' "$nvim/lua/plugins/colorscheme.lua" "$nvim/lua/plugins/icons.lua" \
+          "$nvim/lua/plugins/diffview.lua"
+        printf 'edit %s\n' "$nvim/lua/config/autocmds.lua"
+      else
+        # Not LazyVim yet: the whole folder goes aside for the starter.
+        printf 'dir %s\n' "$nvim"
+      fi
+      ;;
+    review)
+      printf 'file %s\n' "$(lazygit_dir)/config.yml"
+      if hunk_ready; then
+        # setup-keys adds its keys; the rest of herdr's config stays.
+        printf 'edit %s\n' "$HERDR_CONFIG"
+        [[ -n "$DEFAULT_TABS" ]] && printf 'file %s\n' "$(hunk_config_dir)/config.toml"
+      fi
+      ;;
+    yazi)
+      printf 'file %s\n' "$HOME/.config/yazi/theme.toml" ;;
+    statusline)
+      command -v claude >/dev/null 2>&1 || return 0
+      printf 'file %s\n' "$STATUSLINE"
+      statusline_configured || printf 'edit %s\n' "$HOME/.claude/settings.json"
+      ;;
+  esac
+  return 0
+}
+
+# lazygit_dir: lazygit's config folder, also before lazygit is installed
+# (lazygit's own macOS default, unless XDG_CONFIG_HOME is set).
+lazygit_dir() {
+  local dir
+  if dir=$(lazygit --print-config-dir 2>/dev/null) && [[ -n "$dir" ]]; then
+    printf '%s' "$dir"
+  else
+    printf '%s' "${XDG_CONFIG_HOME:-$HOME/Library/Application Support}/lazygit"
+  fi
+}
+
+# target_state KIND PATH: what writing PATH does to the filesystem as it is now.
+#   new       nothing there yet
+#   own       the wizard's own, untouched since it last wrote it
+#   edits     the user's file, which keeps everything but the wizard's part
+#   replaces  the user's file or folder, or the wizard's since edited by them
+# A folder is never "own": the journal keeps no hash to tell whether the user
+# has filled it since, and stage_targets only names one it will move aside.
+target_state() {
+  local kind="$1" path="$2" entry
+  if [[ ! -e "$path" ]]; then echo new; return; fi
+  if [[ "$kind" == edit ]]; then echo edits; return; fi
+  if [[ "$kind" == file ]] && entry=$(journal_entry "$path") &&
+    [[ "${entry##*$'\t'}" == "$(sha256 "$path")" ]]; then
+    echo own
+  else
+    echo replaces
+  fi
+}
+
+# tilde PATH: PATH with $HOME shown as ~, and a folder with a trailing /.
+tilde() {
+  local p="$1"
+  [[ "$p" == "$HOME"/* ]] && p="~/${p#"$HOME"/}"
+  [[ -d "$1" ]] && p="$p/"
+  printf '%s' "$p"
+}
+
+# count_paths [--ADJECTIVE] PATH...: "1 file", "2 files", "1 folder", "1 file
+# and 1 folder"; with --new, "2 new files".
+count_paths() {
+  local p files=0 dirs=0 out="" adj=""
+  if [[ "${1:-}" == --* ]]; then adj="${1#--} "; shift; fi
+  for p in "$@"; do if [[ -d "$p" || "$p" == */ ]]; then dirs=$((dirs + 1)); else files=$((files + 1)); fi; done
+  (( files == 1 )) && out="1 ${adj}file"
+  (( files > 1 )) && out="$files ${adj}files"
+  (( files && dirs )) && out+=" and "
+  (( dirs == 1 )) && out+="1 ${adj}folder"
+  (( dirs > 1 )) && out+="$dirs ${adj}folders"
+  printf '%s' "$out"
+}
+
+# stage_badges NAME: tell the truth about the stage NAME's files, checked on
+# disk right before it runs: which of the user's own it replaces (kept in the
+# backup store, undone by --revert), which it adds its lines to, and how many
+# are new. Prints nothing for a stage that writes no files.
+stage_badges() {
+  local kind path state replaces=() edits=() own=() added=()
+  while read -r kind path; do
+    [[ -n "$path" ]] || continue
+    state=$(target_state "$kind" "$path")
+    case "$state" in
+      replaces) replaces+=("$path") ;;
+      edits) edits+=("$path") ;;
+      own) own+=("$path") ;;
+      new) [[ "$kind" == dir ]] && path="$path/"; added+=("$path") ;;
+    esac
+  done < <(stage_targets "$1")
+  if (( ${#replaces[@]} )); then
+    printf '\n'
+    warn "REPLACES $(count_paths "${replaces[@]}") you already have"
+    for path in "${replaces[@]}"; do note "    $(tilde "$path")"; done
+    note "  a copy of each goes to $(tilde "$BACKUP_DIR")/"
+    note "  undo any time with --revert"
+  fi
+  if (( ${#edits[@]} )); then
+    printf '\n'
+    say "${BLUE}✎${RESET} adds its own lines to $(count_paths "${edits[@]}") you have; the rest stays as it is"
+    for path in "${edits[@]}"; do note "    $(tilde "$path")"; done
+  fi
+  if (( ${#own[@]} )); then
+    printf '\n'
+    note "↻ refreshes $(count_paths "${own[@]}") it set up before"
+  fi
+  if (( ${#added[@]} )); then
+    printf '\n'
+    ok "adds $(count_paths --new "${added[@]}")"
+  fi
+  return 0
+}
+
+# stage_runs NAME: true if this run will run the stage NAME: the choices allow
+# it and the flags include it.
+stage_runs() { stage_selected "$1" && stage_wanted "$1"; }
+
+# tools_to_install: how many tools the install stage will actually install.
+tools_to_install() {
+  local n
+  # shellcheck disable=SC2046 # one formula per word
+  n=$(missing_formulae $(install_formulae) | grep -c . || true)
+  [[ -d /Applications/Ghostty.app ]] || n=$((n + 1))
+  if [[ "$GLYPHS" == on ]] && ! compgen -G "$HOME/Library/Fonts/JetBrainsMonoNerdFont*" >/dev/null; then
+    n=$((n + 1))
+  fi
+  echo "$n"
+}
+
+# show_plan: the whole run on one screen, before it starts: what it installs,
+# which of the user's files it replaces, where it will stop for them, and the
+# way back. Only the stages this run includes count.
+show_plan() {
+  local entry slug kind path replaces=() needs=()
+  for entry in "${STAGES[@]}"; do
+    slug=${entry%%:*}
+    stage_runs "$slug" || continue
+    while read -r kind path; do
+      [[ -n "$path" && "$(target_state "$kind" "$path")" == replaces ]] && replaces+=("$path")
+    done < <(stage_targets "$slug")
+  done
+  # In the order the stages meet them.
+  stage_runs install && ! xcode-select -p >/dev/null 2>&1 && needs+=("install the Xcode command line tools")
+  stage_runs ghostty && ! in_ghostty && needs+=("relaunch into Ghostty")
+  stage_runs herdr && ctrl_space_taken && needs+=("free ctrl+space")
+  stage_runs macos && needs+=("allow notifications" "allow accessibility")
+  stage_runs editor && ! grep -q 'LazyVim/LazyVim' "$HOME/.config/nvim/lua/config/lazy.lua" 2>/dev/null &&
+    needs+=("open Neovim once, while it sets itself up")
+  stage_runs github && ! gh auth status >/dev/null 2>&1 && needs+=("sign in to GitHub")
+
+  printf '\n'
+  say "${BOLD}Plan${RESET}"
+  if stage_runs install; then
+    local n; n=$(tools_to_install)
+    if (( n )); then say "  install $n tool$( (( n == 1 )) || echo s)"; else say "  nothing new to install"; fi
+  fi
+  if (( ${#replaces[@]} )); then
+    say "  ${YELLOW}⚠ replaces $(count_paths --existing "${replaces[@]}")${RESET}"
+    for path in "${replaces[@]}"; do note "      $(tilde "$path")"; done
+  else
+    say "  replaces none of your files"
+  fi
+  if (( ${#needs[@]} == 1 )); then
+    say "  1 point where it needs you:"
+  elif (( ${#needs[@]} )); then
+    say "  ${#needs[@]} points where it needs you:"
+  else
+    say "  needs nothing from you along the way"
+  fi
+  if (( ${#needs[@]} )); then for entry in "${needs[@]}"; do say "    $entry"; done; fi
+  say "  undo:  --revert"
+}
+
 # stage_selected NAME: true if the choices allow the stage NAME: the fixed
 # stages always, a group's stage only while one of its groups is selected.
 # shell is fixed too: its blocks also hold Ghostty's shell integration, history,
@@ -3306,9 +3567,13 @@ TOTAL_STAGES=$(selected_stage_count)
 
 usage() {
   cat <<EOF
-usage: bash $(basename "$0") [--from NAME | --only NAME,NAME | --skip NAME,NAME | --tour | --list | --revert [--restore]]
+usage: bash $(basename "$0") [--yes] [--from NAME | --only NAME,NAME | --skip NAME,NAME | --tour]
+       bash $(basename "$0") --list | --revert [--restore]
 
   (no flags)       run every stage; finished stages report "already done" and move on
+  --yes            for a re-run: reuse the saved answers, go without asking, and don't
+                   pause between stages (or show the tour). Steps only you can do, and
+                   replacing a file you changed, still ask
   --from NAME      start at this stage, e.g. --from editor (names: see --list)
   --only NAME,...  run just these stages, e.g. --only herdr,macos
   --skip NAME,...  run everything except these, e.g. --skip yazi,github
@@ -3349,14 +3614,33 @@ stage_list() {
 }
 
 # What this run does. MODE is run, list, revert, restore or help; for a run,
-# FROM, ONLY and SKIP pick the stages (see stage_wanted).
+# FROM, ONLY and SKIP pick the stages (see stage_wanted). YES is 1 for --yes.
 MODE=run
 FROM=""
 ONLY=""
 SKIP=""
+YES=0
 
-# parse_args ARGS...: set MODE, FROM, ONLY and SKIP. Returns 2 on bad usage.
+# parse_args ARGS...: set MODE, FROM, ONLY, SKIP and YES. Returns 2 on bad usage.
+# --yes may come before or after the other flags, and only goes with a run.
 parse_args() {
+  local arg rest=()
+  for arg in "$@"; do
+    if [[ "$arg" == --yes ]]; then
+      (( YES == 0 )) || return 2
+      YES=1
+    else
+      rest+=("$arg")
+    fi
+  done
+  # ${rest[@]+...}: bash 3.2 calls an empty array unbound under set -u.
+  _parse_args ${rest[@]+"${rest[@]}"} || return 2
+  (( YES == 0 )) || [[ "$MODE" == run ]] || return 2
+}
+
+# _parse_args ARGS...: parse_args for everything but --yes: at most one flag
+# and its value. Returns 2 on bad usage.
+_parse_args() {
   case "${1:-}" in
     "") ;;
     --tour) ONLY=",tour," ;;
@@ -3437,9 +3721,13 @@ for entry in "${STAGES[@]}"; do
     continue
   fi
   stage "${entry#*:}"
+  stage_badges "${entry%%:*}"
   "stage_${entry%%:*}"
-  # New answers can add or drop stages.
-  [[ "${entry%%:*}" == choices ]] && TOTAL_STAGES=$(selected_stage_count)
+  if [[ "${entry%%:*}" == choices ]]; then
+    # New answers can add or drop stages.
+    TOTAL_STAGES=$(selected_stage_count)
+    plan_gate || { printf '\n'; exit 0; }
+  fi
 done
 JOURNALING=0
 
