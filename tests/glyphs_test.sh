@@ -151,20 +151,20 @@ test_choosing_plain_text_saves_it_and_skips_the_font() {
   ( # subshell: the fake brew and bat on PATH never outlive this test
     fake_brew
     fake_bat
-    # banner, plain text, projects folder (Enter), don't create it, no tabs, done
-    printf '\n2\n\nn\n3\n\n' > "$T/answers"
+    # banner, untick icons, accept, projects folder (Enter), don't create it, no tabs, done
+    printf '\n1\n\n\nn\n3\n\n' > "$T/answers"
     CLI_INPUT="$T/answers" cli --only choices
-    check "grep -qx 'GLYPHS=off' '$STATE/choices.env'" "answer 2 saves plain text"
+    check "grep -qx 'GLYPHS=off' '$STATE/choices.env'" "unticking icons saves plain text"
     cli --only install
     check "grep -q 'formula' '$T/brew.log'" "the install stage ran brew"
     check "! grep -q 'font-jetbrains-mono-nerd-font' '$T/brew.log'" "plain text: no Nerd Font install"
-    # banner, don't reuse, Enter for icons (keeps plain text), Enter, don't create, Enter keeps no tabs, done
+    # banner, don't reuse, Enter accepts the screen (keeps plain text), Enter, don't create, Enter keeps no tabs, done
     printf '\nn\n\n\nn\n\n\n' > "$T/answers"
     CLI_INPUT="$T/answers" cli --only choices
     check "grep -qx 'GLYPHS=off' '$STATE/choices.env'" "Enter on a re-run keeps the saved answer"
-    printf '\nn\n1\n\nn\n\n\n' > "$T/answers"
+    printf '\nn\n1\n\n\nn\n\n\n' > "$T/answers"
     CLI_INPUT="$T/answers" cli --only choices
-    check "grep -qx 'GLYPHS=on' '$STATE/choices.env'" "answer 1 saves icons"
+    check "grep -qx 'GLYPHS=on' '$STATE/choices.env'" "ticking icons again saves icons"
     cli --only install
     check "grep -q 'font-jetbrains-mono-nerd-font' '$T/brew.log'" "icons: installs the Nerd Font"
     printf '%s %s\n' "$PASSES" "$FAILS" > "$T/tally"
