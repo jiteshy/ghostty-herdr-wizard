@@ -85,8 +85,21 @@ test_my_names_renames_each_of_the_four() {
   answer ""
   wizard 'ask_default_tabs; printf "RESULT=%s\n" "$DEFAULT_TABS"'
   check "grep -q 'choice \[2\]' '$T/out'" "a later run defaults to 'my names'"
-  check "grep -q '1 claude' '$T/out'" "and shows the saved names"
+  check "grep -q '1 agents' '$T/out'" "the list still shows the four that '1) use these four' gives"
+  check "grep -q '\[claude\]' '$T/out'" "renaming offers the saved names"
   check "grep -qx 'RESULT=claude,source code,dev logs,git review' '$T/out'" "Enter keeps the custom names"
+  answer 1
+  wizard 'ask_default_tabs; printf "RESULT=%s\n" "$DEFAULT_TABS"'
+  check "grep -qx 'RESULT=$SUGGESTED' '$T/out'" "choosing 1 goes back to the suggested four"
+  cleanup
+}
+
+test_tab_names_are_never_glob_expanded() {
+  new_home
+  mkdir -p "$T/cwd" && touch "$T/cwd/afile"
+  answer 2 "*" "" "" ""
+  wizard 'cd "$T/cwd"; ask_default_tabs; ask_default_tabs <<< ""; printf "RESULT=%s\n" "$DEFAULT_TABS"'
+  check "grep -qx 'RESULT=\*,source code,local server,git review' '$T/out'" "a tab named * stays * (got '$(grep RESULT "$T/out")')"
   cleanup
 }
 

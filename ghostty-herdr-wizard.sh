@@ -1927,11 +1927,12 @@ stage_yazi() {
 ask_default_tabs() {
   local purposes=("Claude Code / Codex" "Neovim on the files" "npm run dev, logs" \
     "hunk-by-hunk review of what the agent did")
-  local current=1 answer name i
-  local oldifs="$IFS"; IFS=','
-  local names=($DEFAULT_TABS)
-  (( ${#names[@]} == 4 )) || names=($SUGGESTED_TABS)
-  IFS="$oldifs"
+  local current=1 answer name i shown=() names=()
+  # read -a, not an unquoted split, so a tab named * isn't glob-expanded.
+  IFS=',' read -ra shown <<< "$SUGGESTED_TABS"
+  # Renaming starts from the saved names, or the suggested four without them.
+  IFS=',' read -ra names <<< "$DEFAULT_TABS"
+  (( ${#names[@]} == 4 )) || names=("${shown[@]}")
   if [[ -z "$DEFAULT_TABS" ]]; then current=3
   elif [[ "$DEFAULT_TABS" != "$SUGGESTED_TABS" ]]; then current=2
   fi
@@ -1943,7 +1944,7 @@ ask_default_tabs() {
   say "herdr can open the same four in every new repo and worktree:"
   printf '\n'
   for i in 0 1 2 3; do
-    printf '  %d %-14s %s\n' $((i + 1)) "${names[$i]}" "${purposes[$i]}"
+    printf '  %d %-14s %s\n' $((i + 1)) "${shown[$i]}" "${purposes[$i]}"
   done
   printf '\n'
   say "1) use these four        (suggested)"
@@ -1982,7 +1983,8 @@ ask_default_tabs() {
 # DEFAULT_TABS whenever a workspace or a worktree is created.
 write_worktree_tabs_plugin() {
   local item labels=""
-  local oldifs="$IFS"; IFS=','; local parts=($DEFAULT_TABS); IFS="$oldifs"
+  local parts=()
+  IFS=',' read -ra parts <<< "$DEFAULT_TABS"
   for item in "${parts[@]}"; do
     item="${item#"${item%%[![:space:]]*}"}"   # trim leading spaces
     item="${item%"${item##*[![:space:]]}"}"   # trim trailing spaces
@@ -2161,8 +2163,12 @@ done
 # through the plugin action, which reviews the tab focused when it is invoked.
 # On a brand-new workspace there is nothing to review yet, so hunk shows the
 # working tree until you refresh it once the agent has edited something.
-if [[ -n "$review_tab_id" ]] \
-  && "$herdr_bin" plugin list 2>/dev/null | grep -q 'jhochenbaum\.hunkdiff'; then
+# hunk's own review.placement decides where the pane opens; "overlay" keeps it
+# in this tab instead of adding a fifth.
+# The list is captured first: under pipefail, grep -q quitting early could
+# SIGPIPE herdr and fail the check.
+plugins=$("$herdr_bin" plugin list 2>/dev/null) || plugins=""
+if [[ -n "$review_tab_id" && "$plugins" == *jhochenbaum.hunkdiff* ]]; then
   "$herdr_bin" tab focus "$review_tab_id" >/dev/null 2>&1
   "$herdr_bin" plugin action invoke review --plugin jhochenbaum.hunkdiff >/dev/null 2>&1
 fi
