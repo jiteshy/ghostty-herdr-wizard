@@ -615,36 +615,43 @@ test_journal_is_only_ever_appended() {
   check "[[ -z '$bad' ]]" "no in-place rewrite of \$JOURNAL: $bad"
 }
 
-# End to end through the real CLI: the Ghostty config stage (3) against an
+# End to end through the real CLI: the Ghostty config stage against an
 # existing config, twice, then --revert.
 test_ghostty_stage_end_to_end() {
   new_home
   mkdir -p "$H/.config/ghostty"
   printf '# my own ghostty config\ntheme = Dracula\n' > "$H/.config/ghostty/config"
   cp "$H/.config/ghostty/config" "$T/original"
-  cli --only 3
-  check "grep -q \"MODIFY	$H/.config/ghostty/config\" '$STATE/journal.tsv'" "stage 3 journals the Ghostty config"
-  check "! cmp -s '$H/.config/ghostty/config' '$T/original'" "stage 3 replaced the config"
-  cli --only 3
+  cli --only ghostty
+  check "grep -q \"MODIFY	$H/.config/ghostty/config\" '$STATE/journal.tsv'" "ghostty stage journals the Ghostty config"
+  check "! cmp -s '$H/.config/ghostty/config' '$T/original'" "ghostty stage replaced the config"
+  cli --only ghostty
   cli --revert
   same_bytes "$H/.config/ghostty/config" "$T/original" "--revert restores the user's config byte-identical"
   cleanup
 }
 
-# End to end through the real CLI: the shell stage (8) writes marked blocks
-# and new files. Twice, then --revert leaves the user's .zshrc as it was.
+# End to end through the real CLI: the shell stage writes marked blocks and new
+# files. Twice, then --revert leaves the user's .zshrc as it was.
 test_shell_stage_end_to_end() {
   new_home
   printf '# mine\nalias gs="git status"\n' > "$H/.zshrc"
   cp "$H/.zshrc" "$T/original"
-  cli --only 8
-  check "grep -q \"BLOCK	$H/.zshrc\" '$STATE/journal.tsv'" "stage 8 journals its .zshrc block"
-  check "grep -q \"CREATE	$H/.local/bin/hproj\" '$STATE/journal.tsv'" "stage 8 journals the files it creates"
-  cli --only 8
-  cli --revert
-  same_bytes "$H/.zshrc" "$T/original" "--revert leaves the user's .zshrc byte-identical"
-  check "[[ ! -e '$H/.zprofile' && ! -e '$H/.local/bin/hproj' && ! -e '$H/.config/ghostty-herdr-cheatsheet.md' ]]" \
-    "files the stage created are moved away"
+  ( # subshell: the fake brew and bat on PATH never outlive this test
+    fake_brew
+    fake_bat
+    cli --only shell
+    check "grep -q \"BLOCK	$H/.zshrc\" '$STATE/journal.tsv'" "shell stage journals its .zshrc block"
+    check "grep -q \"CREATE	$H/.local/bin/hproj\" '$STATE/journal.tsv'" "shell stage journals the files it creates"
+    check "grep -q '^install .*zsh-autosuggestions' '$T/brew.log'" "run on its own, it installs its missing tools"
+    cli --only shell
+    cli --revert
+    same_bytes "$H/.zshrc" "$T/original" "--revert leaves the user's .zshrc byte-identical"
+    check "[[ ! -e '$H/.zprofile' && ! -e '$H/.local/bin/hproj' && ! -e '$H/.config/ghostty-herdr-cheatsheet.md' ]]" \
+      "files the stage created are moved away"
+    printf '%s %s\n' "$PASSES" "$FAILS" > "$T/tally"
+  )
+  read -r PASSES FAILS < "$T/tally"
   cleanup
 }
 

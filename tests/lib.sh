@@ -50,11 +50,13 @@ wizard() {
   ) < "$T/answers" > "$T/out" 2>&1
 }
 # cli ARGS...: run the real script as a user would. Enter for every pause, or
-# the answers in the file CLI_INPUT names.
+# the answers in the file CLI_INPUT names. It runs as if inside Ghostty and
+# outside herdr, so the ghostty stage never opens Ghostty or fills the clipboard.
 cli() {
   local i
   for i in 1 2 3 4 5 6 7 8 9 10; do printf '\n'; done > "$T/enter"
-  HOME="$H" GHW_TTY="$T/tty" bash "$WIZARD" "$@" < "${CLI_INPUT:-$T/enter}" > "$T/out" 2>&1
+  HOME="$H" GHW_TTY="$T/tty" TERM_PROGRAM=ghostty HERDR_ENV='' \
+    bash "$WIZARD" "$@" < "${CLI_INPUT:-$T/enter}" > "$T/out" 2>&1
 }
 # fake_brew: put a brew on PATH that only logs its arguments to $T/brew.log.
 fake_brew() {
@@ -62,6 +64,14 @@ fake_brew() {
   printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/brew.log"\n' "$T" > "$T/bin/brew"
   chmod +x "$T/bin/brew"
   PATH="$T/bin:$PATH"
+}
+# fake_bat: put a bat on PATH whose Catppuccin themes are already there, so no
+# stage downloads them. Call after fake_brew.
+fake_bat() {
+  mkdir -p "$T/bin" "$T/bat/themes"
+  touch "$T/bat/themes/Catppuccin Mocha.tmTheme" "$T/bat/themes/Catppuccin Latte.tmTheme"
+  printf '#!/bin/sh\n[ "$1" = --config-dir ] && echo "%s/bat"\nexit 0\n' "$T" > "$T/bin/bat"
+  chmod +x "$T/bin/bat"
 }
 sha() { shasum -a 256 "$1" | awk '{print $1}'; }
 journal_lines() { grep -c . "$STATE/journal.tsv" 2>/dev/null || true; }
