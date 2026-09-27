@@ -197,6 +197,32 @@ BACKUP_DIR="$STATE_DIR/backups"
 REPLACED_DIR="$STATE_DIR/replaced/$(date +%Y%m%d-%H%M%S)"
 # 1 while a stage that records its changes is running (see JOURNALED_STAGES).
 JOURNALING=0
+# Answers saved from earlier runs, one KEY=value per line.
+CHOICES="$STATE_DIR/choices.env"
+
+# choice_get KEY: the saved answer for KEY, if there is one.
+choice_get() {
+  [[ -f "$CHOICES" ]] || return 1
+  local line; line=$(grep -E "^${1}=" "$CHOICES" | tail -n1) || return 1
+  printf '%s' "${line#*=}"
+}
+
+# choice_set KEY VALUE: save an answer so later runs (and --only) reuse it.
+choice_set() {
+  local tmp
+  mkdir -p "$STATE_DIR"
+  # Same directory as the target, so the mv is atomic.
+  tmp=$(mktemp "$STATE_DIR/choices.XXXXXX")
+  grep -vE "^${1}=" "$CHOICES" > "$tmp" 2>/dev/null || true
+  printf '%s=%s\n' "$1" "$2" >> "$tmp"
+  mv "$tmp" "$CHOICES"
+}
+
+# The Nerd Font switch: "on" puts file, folder and git icons everywhere; "off"
+# gives every tool a plain-text look that works in any font. Asked in the
+# Ghostty install stage, then followed by every config that could show a glyph.
+GLYPHS=$(choice_get GLYPHS || true)
+[[ "$GLYPHS" == off ]] || GLYPHS=on
 
 # Homebrew lives in /opt/homebrew on Apple silicon and /usr/local on Intel. Put it
 # on PATH for this run, so a terminal opened before installing brew still works.
@@ -492,7 +518,13 @@ ghostty_config() {
 # Reload after editing: Cmd-Shift-,
 
 # ── Font ──────────────────────────────────────────────
-font-family = JetBrainsMono Nerd Font
+EOF
+  if [[ "$GLYPHS" == on ]]; then
+    printf 'font-family = JetBrainsMono Nerd Font\n'
+  else
+    printf "# Ghostty's built-in JetBrains Mono: icons are switched off.\n"
+  fi
+  cat <<'EOF'
 font-size = 14
 
 # ── Look ──────────────────────────────────────────────
@@ -612,7 +644,15 @@ write_ghostty_config() {
 # and is hard to read in both light and dark mode. Each segment gets a fixed
 # text colour instead, with its background shifted until contrast is at least
 # 5:1 (WCAG AA is 4.5): white on darker shades, #1E1E2E on lighter ones.
+#
+# With the glyph switch off: starship's plain-text-symbols preset instead, which
+# spells symbols out ("git ", "nodejs ") so the prompt needs no Nerd Font.
+# (Its no-nerd-font preset still shows a glyph for the git branch.)
 starship_config() {
+  if [[ "$GLYPHS" != on ]]; then
+    starship preset plain-text-symbols
+    return
+  fi
   local apple=$'\xef\x85\xb9'
   starship preset pastel-powerline | awk -v apple="$apple" '
     $0 == "$username\\" { next }
@@ -679,9 +719,23 @@ GREEN=$(rgb "166;227;161"); YELLOW=$(rgb "249;226;175"); RED=$(rgb "243;139;168"
 PEACH=$(rgb "250;179;135"); DIM=$(rgb "127;132;156"); RESET=$'\033[0m'
 SEP=" ${DIM}│${RESET} "
 
+EOF
+  if [[ "$GLYPHS" == on ]]; then
+    cat <<'EOF'
+# Nerd Font icons. Set them to "" for plain text.
 ICON_MODEL=$'\xf3\xb0\x9a\xa9'  # nf-md-robot
 ICON_DIR=$'\xef\x81\xbb'        # nf-fa-folder
 ICON_BRANCH=$'\xee\x9c\xa5'     # nf-dev-git_branch
+EOF
+  else
+    cat <<'EOF'
+# Plain text: no Nerd Font. Re-run the wizard with icons on to fill these in.
+ICON_MODEL=""
+ICON_DIR=""
+ICON_BRANCH=""
+EOF
+  fi
+  cat <<'EOF'
 
 # pct_color N: green under 50, yellow under 80, red from 80
 pct_color() {
@@ -707,10 +761,10 @@ tokens() {
 if [[ "$dir" == "$HOME"* ]]; then dir="~${dir#"$HOME"}"; fi
 dir=$(awk -F/ '{ if (NF > 4) printf "…/%s/%s/%s", $(NF-2), $(NF-1), $NF; else printf "%s", $0 }' <<<"$dir")
 
-line1="${MAUVE}${ICON_MODEL} ${model}${RESET}"
+line1="${MAUVE}${ICON_MODEL:+$ICON_MODEL }${model}${RESET}"
 if [[ -n "$effort" ]]; then line1+=" ${DIM}effort${RESET} ${PEACH}${effort}${RESET}"; fi
-line1+="${SEP}${BLUE}${ICON_DIR} ${dir}${RESET}"
-if [[ -n "$worktree" ]]; then line1+="${SEP}${TEAL}${ICON_BRANCH} worktree ${worktree}${RESET}"; fi
+line1+="${SEP}${BLUE}${ICON_DIR:+$ICON_DIR }${dir}${RESET}"
+if [[ -n "$worktree" ]]; then line1+="${SEP}${TEAL}${ICON_BRANCH:+$ICON_BRANCH }worktree ${worktree}${RESET}"; fi
 
 if [[ -n "$ctx_pct" ]]; then
   line2="$(pct context "$ctx_pct") ${DIM}($(tokens "$ctx_tokens")/$(tokens "$ctx_size") tokens)${RESET}"
@@ -763,14 +817,44 @@ stage_preflight() {
   pause
 }
 
+# ask_glyphs: the Nerd Font + icons question. Sets and saves GLYPHS; Enter keeps
+# the current answer (icons on a first run).
+ask_glyphs() {
+  local current=1 answer
+  [[ "$GLYPHS" == on ]] || current=2
+  say "${BOLD}Nerd Font + icons${RESET}"
+  note "File, folder and git icons in the prompt, ls, yazi, Neovim, lazygit, herdr's"
+  note "sidebar and the Claude Code status line. They need a Nerd Font in whichever"
+  note "terminal shows them, or you get boxes instead."
+  printf '\n'
+  say "1) icons  (suggested)"
+  note "   installs JetBrains Mono Nerd Font, or uses it if you have it"
+  say "2) plain text"
+  note "   no icons anywhere, works in any font (e.g. iTerm with a font you like)"
+  printf '\n'
+  printf '  %schoice [%s]:%s ' "$BOLD" "$current" "$RESET"
+  read -r answer || true
+  case "${answer:-$current}" in
+    2) GLYPHS=off ;;
+    *) GLYPHS=on ;;
+  esac
+  choice_set GLYPHS "$GLYPHS"
+  ok "icons: $GLYPHS (re-run this stage to change it)"
+  printf '\n'
+}
+
 stage_install_ghostty() {
-  say "Ghostty is the terminal app. The Nerd Font adds file, git and language icons."
+  say "Ghostty is the terminal app."
+  printf '\n'
+  ask_glyphs
   if [[ -d /Applications/Ghostty.app ]]; then
     ok "Ghostty already in /Applications"
   else
     run brew install --cask ghostty
   fi
-  if compgen -G "$HOME/Library/Fonts/JetBrainsMonoNerdFont*" >/dev/null; then
+  if [[ "$GLYPHS" != on ]]; then
+    note "no Nerd Font needed with icons off"
+  elif compgen -G "$HOME/Library/Fonts/JetBrainsMonoNerdFont*" >/dev/null; then
     ok "JetBrains Mono Nerd Font already installed"
   else
     run brew install --cask font-jetbrains-mono-nerd-font
@@ -782,7 +866,9 @@ stage_ghostty_config() {
   say "Font, Catppuccin Mocha theme (always dark), Option-as-Alt, quick terminal,"
   say "and Cmd shortcuts that drive herdr."
   write_ghostty_config
-  if "$GHOSTTY_BIN" +list-fonts 2>/dev/null | grep "JetBrainsMono Nerd Font" >/dev/null; then
+  if [[ "$GLYPHS" != on ]]; then
+    note "icons are off, so Ghostty keeps its built-in font"
+  elif "$GHOSTTY_BIN" +list-fonts 2>/dev/null | grep "JetBrainsMono Nerd Font" >/dev/null; then
     ok "Ghostty can see JetBrainsMono Nerd Font"
   else
     warn "Ghostty doesn't list 'JetBrainsMono Nerd Font' yet. It may appear after Ghostty restarts."
@@ -808,6 +894,11 @@ stage_move_into_ghostty() {
     exit 0
   fi
   ok "Running inside Ghostty"
+  if [[ "$GLYPHS" != on ]]; then
+    note "Icons are off, so there's no Nerd Font to check."
+    step "Check: colours are Catppuccin (dark mauve/pink tones)."
+    return 0
+  fi
   say "Check the icons below. You should see: React, TypeScript, git branch, folder, Node, Apple."
   printf '\n      %s    %s    %s    %s    %s    %s\n\n' \
     $'\xee\x9e\xba' $'\xee\x98\xa8' $'\xee\x9c\xa5' $'\xef\x81\xbb' $'\xee\x9c\x98' $'\xef\x85\xb9'
@@ -842,7 +933,7 @@ stage_free_ctrl_space() {
 }
 
 stage_toolbelt() {
-  say "bat (cat with syntax), eza (ls with icons/git), fd + ripgrep (find/grep), fzf (fuzzy"
+  say "bat (cat with syntax), eza (ls with git status), fd + ripgrep (find/grep), fzf (fuzzy"
   say "finder), zoxide (jump dirs), glow (markdown), jless (JSON viewer), btop (processes),"
   say "tlrc (tldr examples), zsh autosuggestions + syntax highlighting."
   brew_formulae bat eza fd ripgrep fzf zoxide starship glow jless btop tlrc jq \
@@ -864,7 +955,11 @@ stage_toolbelt() {
 }
 
 stage_starship() {
-  say "Pastel powerline prompt:   Apple  ›  folder  ›  git branch  ›  Node/Bun/Deno/Python version  ›  time"
+  if [[ "$GLYPHS" == on ]]; then
+    say "Pastel powerline prompt:   Apple  ›  folder  ›  git branch  ›  Node/Bun/Deno/Python version  ›  time"
+  else
+    say "Plain-text prompt: folder, git branch and runtime versions, spelled out (icons are off)."
+  fi
   note "Runtime versions only appear inside projects that use them (e.g. a package.json for Node)."
   brew_formulae starship
   local preset
@@ -877,48 +972,21 @@ stage_starship() {
     printf '%s\n\n' "$RESET"
     note "New shells use it. Tweak segments in ~/.config/starship.toml (https://starship.rs/config)."
   else
-    warn "couldn't generate the pastel-powerline preset; the default prompt still works"
-    SKIPPED+=("starship preset: starship preset pastel-powerline -o ~/.config/starship.toml")
+    warn "couldn't generate the starship prompt config; the default prompt still works"
+    SKIPPED+=("starship prompt config: re-run this stage")
   fi
   pause
 }
 
-stage_shell() {
-  say "Adds a marked block to ~/.zprofile and ~/.zshrc. Your existing lines stay as they are."
-  note "Aliases like ls→eza and cat→bat are skipped inside Claude Code's shell, so agents"
-  note "get the real commands and their flags."
-  printf '\n'
-  local projects answer projects_line
-  projects=$(current_projects_dir)
-  say "Where do you keep your git repos? 'p' and herdr's prefix m search this folder."
-  printf '  %sProjects folder%s %s[Enter keeps %s]%s ' "$BOLD" "$RESET" "$DIM" "$projects" "$RESET"
-  read -r answer || true
-  if [[ -n "$answer" ]]; then projects="${answer/#\~/$HOME}"; fi
-  if [[ ! -d "$projects" ]]; then
-    if confirm "$projects doesn't exist. Create it?"; then
-      mkdir -p "$projects"
-    else
-      warn "p and prefix m will find nothing until $projects exists"
-    fi
-  fi
-  if [[ "$projects" == "$HOME"/* ]]; then
-    projects_line="\$HOME${projects#"$HOME"}"
-  else
-    projects_line="$projects"
-  fi
-  export PROJECTS_DIR="$projects"
-  printf '\n'
-  upsert_block "$HOME/.zprofile" < <(
-    cat <<'EOF'
-export PATH="$HOME/.local/bin:$PATH"
-export EDITOR=nvim VISUAL=nvim
-EOF
-    printf 'export PROJECTS_DIR="%s"\n' "$projects_line"
-    cat <<'EOF'
-export BAT_THEME="Catppuccin Mocha"
-EOF
-  )
-  upsert_block "$HOME/.zshrc" <<'EOF'
+# eza_icons < content: pass content through, minus every eza --icons flag when
+# the glyph switch is off.
+eza_icons() {
+  if [[ "$GLYPHS" == on ]]; then cat; else sed -E 's/ --icons=[a-z]+//g'; fi
+}
+
+# zshrc_block: the wizard's block in ~/.zshrc.
+zshrc_block() {
+  eza_icons <<'EOF'
 # Ghostty shell integration for plain shells. Ghostty starts windows through
 # ghostty-launch, so it can't inject this itself. Skipped inside herdr panes.
 if [[ -n "${GHOSTTY_RESOURCES_DIR:-}" && -z "${HERDR_ENV:-}" ]]; then
@@ -971,7 +1039,11 @@ _brew="${HOMEBREW_PREFIX:-/opt/homebrew}/share"
 [[ -r $_brew/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]] && source $_brew/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
 unset _brew
 EOF
-  install_file "$HOME/.local/bin/hproj" <<'EOF'
+}
+
+# hproj_script: the project picker behind `p` and herdr's prefix m.
+hproj_script() {
+  eza_icons <<'EOF'
 #!/usr/bin/env bash
 # hproj: fuzzy-pick a project and open it as a herdr workspace.
 #   hproj          create and focus a herdr workspace for the project
@@ -993,6 +1065,45 @@ else
   herdr workspace create --cwd "$dir" --label "$(basename "$dir")" --focus >/dev/null
 fi
 EOF
+}
+
+stage_shell() {
+  say "Adds a marked block to ~/.zprofile and ~/.zshrc. Your existing lines stay as they are."
+  note "Aliases like ls→eza and cat→bat are skipped inside Claude Code's shell, so agents"
+  note "get the real commands and their flags."
+  printf '\n'
+  local projects answer projects_line
+  projects=$(current_projects_dir)
+  say "Where do you keep your git repos? 'p' and herdr's prefix m search this folder."
+  printf '  %sProjects folder%s %s[Enter keeps %s]%s ' "$BOLD" "$RESET" "$DIM" "$projects" "$RESET"
+  read -r answer || true
+  if [[ -n "$answer" ]]; then projects="${answer/#\~/$HOME}"; fi
+  if [[ ! -d "$projects" ]]; then
+    if confirm "$projects doesn't exist. Create it?"; then
+      mkdir -p "$projects"
+    else
+      warn "p and prefix m will find nothing until $projects exists"
+    fi
+  fi
+  if [[ "$projects" == "$HOME"/* ]]; then
+    projects_line="\$HOME${projects#"$HOME"}"
+  else
+    projects_line="$projects"
+  fi
+  export PROJECTS_DIR="$projects"
+  printf '\n'
+  upsert_block "$HOME/.zprofile" < <(
+    cat <<'EOF'
+export PATH="$HOME/.local/bin:$PATH"
+export EDITOR=nvim VISUAL=nvim
+EOF
+    printf 'export PROJECTS_DIR="%s"\n' "$projects_line"
+    cat <<'EOF'
+export BAT_THEME="Catppuccin Mocha"
+EOF
+  )
+  upsert_block "$HOME/.zshrc" < <(zshrc_block)
+  install_file "$HOME/.local/bin/hproj" < <(hproj_script)
   chmod +x "$HOME/.local/bin/hproj"
   install_file "$CHEATSHEET" < <(cheatsheet)
   note "New shells pick this up. This wizard's own shell doesn't need it."
@@ -1029,17 +1140,21 @@ stage_git_diffs() {
   pause
 }
 
-stage_lazygit() {
-  say "A full git UI: stage single lines or hunks, commit, rebase, resolve conflicts."
-  say "Diffs render through delta; press | inside lazygit to switch to difftastic."
-  brew_formulae lazygit
-  local lg_dir
-  if lg_dir=$(lazygit --print-config-dir 2>/dev/null) && [[ -n "$lg_dir" ]]; then
-    install_file "$lg_dir/config.yml" <<'EOF'
+# lazygit_config: lazygit's config.yml. Nerd Font icons only with the glyph
+# switch on.
+lazygit_config() {
+  cat <<'EOF'
 # lazygit config, written by ghostty-herdr-wizard.sh
 # Reference: https://github.com/jesseduffield/lazygit/blob/master/docs/Config.md
 gui:
-  nerdFontsVersion: "3"
+EOF
+  # "" is lazygit's own default: no icons.
+  if [[ "$GLYPHS" == on ]]; then
+    printf '  nerdFontsVersion: "3"\n'
+  else
+    printf '  nerdFontsVersion: ""\n'
+  fi
+  cat <<'EOF'
 git:
   # press | to cycle between these
   diffRenderers:
@@ -1052,6 +1167,15 @@ git:
 os:
   editPreset: nvim
 EOF
+}
+
+stage_lazygit() {
+  say "A full git UI: stage single lines or hunks, commit, rebase, resolve conflicts."
+  say "Diffs render through delta; press | inside lazygit to switch to difftastic."
+  brew_formulae lazygit
+  local lg_dir
+  if lg_dir=$(lazygit --print-config-dir 2>/dev/null) && [[ -n "$lg_dir" ]]; then
+    install_file "$lg_dir/config.yml" < <(lazygit_config)
   else
     warn "couldn't find lazygit's config directory"
     SKIPPED+=("lazygit config not written")
@@ -1079,6 +1203,68 @@ stage_github() {
     run gh extension install dlvhdr/gh-dash
   fi
   pause
+}
+
+# nvim_icons_plugin: LazyVim's icon provider, set by the glyph switch. Written
+# either way, so switching back to icons later undoes the ASCII fallback.
+nvim_icons_plugin() {
+  if [[ "$GLYPHS" == on ]]; then
+    cat <<'EOF'
+-- File and folder icons: "glyph" needs a Nerd Font, "ascii" works in any font.
+-- Written by ghostty-herdr-wizard.sh from its Nerd Font + icons choice.
+return {
+  { "nvim-mini/mini.icons", opts = { style = "glyph" } },
+}
+EOF
+    return 0
+  fi
+  cat <<'EOF'
+-- Plain text: no Nerd Font. Written by ghostty-herdr-wizard.sh from its
+-- Nerd Font + icons choice; re-run the wizard with icons on to undo.
+--
+-- LazyVim's own icons (diagnostics, git signs, completion kinds) are replaced
+-- one by one. The kind names are LazyVim's at the time of writing; a kind it
+-- adds later keeps its glyph.
+local kinds = {}
+for _, kind in ipairs({
+  "Array", "Boolean", "Class", "Codeium", "Color", "Control", "Collapsed",
+  "Constant", "Constructor", "Copilot", "Enum", "EnumMember", "Event", "Field",
+  "File", "Folder", "Function", "Interface", "Key", "Keyword", "Method",
+  "Module", "Namespace", "Null", "Number", "Object", "Operator", "Package",
+  "Property", "Reference", "Snippet", "String", "Struct", "Supermaven",
+  "TabNine", "Text", "TypeParameter", "Unit", "Value", "Variable",
+}) do
+  kinds[kind] = ""
+end
+
+return {
+  { "nvim-mini/mini.icons", opts = { style = "ascii" } },
+  {
+    "LazyVim/LazyVim",
+    opts = {
+      icons = {
+        misc = { dots = "..." },
+        ft = { octo = "", gh = "", ["markdown.gh"] = "" },
+        dap = {
+          Stopped = { "> ", "DiagnosticWarn", "DapStoppedLine" },
+          Breakpoint = "B ",
+          BreakpointCondition = "C ",
+          BreakpointRejected = { "R ", "DiagnosticError" },
+          LogPoint = ".>",
+        },
+        diagnostics = { Error = "E ", Warn = "W ", Hint = "H ", Info = "I " },
+        git = { added = "+ ", modified = "~ ", removed = "- " },
+        kinds = kinds,
+      },
+    },
+  },
+  -- lualine's default separators are powerline glyphs.
+  {
+    "nvim-lualine/lualine.nvim",
+    opts = { options = { component_separators = "|", section_separators = "" } },
+  },
+}
+EOF
 }
 
 stage_neovim() {
@@ -1142,6 +1328,7 @@ return {
   { "LazyVim/LazyVim", opts = { colorscheme = "catppuccin-mocha" } },
 }
 EOF
+  install_file "$nvim_dir/lua/plugins/icons.lua" < <(nvim_icons_plugin)
   install_file "$nvim_dir/lua/plugins/diffview.lua" <<'EOF'
 -- Review everything an agent changed: file list on the left, before/after on the right.
 return {
@@ -1187,6 +1374,51 @@ EOF
   fi
 }
 
+# yazi_theme: yazi's theme.toml. With the glyph switch off, it empties yazi's
+# icon rules and swaps its powerline separators for plain ones.
+yazi_theme() {
+  cat <<'EOF'
+[flavor]
+dark = "catppuccin-mocha"
+light = "catppuccin-mocha"
+EOF
+  [[ "$GLYPHS" == on ]] && return 0
+  cat <<'EOF'
+
+# Plain text: every glyph in yazi's default theme, replaced.
+[tabs]
+sep_inner = { open = "[", close = "]" }
+sep_outer = { open = "", close = "" }
+
+[indicator]
+padding = { open = "", close = "" }
+
+[status]
+sep_left  = { open = "", close = "" }
+sep_right = { open = "", close = "" }
+
+[which]
+separator = " - "
+
+[notify]
+icon_info  = "i"
+icon_warn  = "!"
+icon_error = "x"
+
+[cmp]
+icon_file    = ""
+icon_folder  = "/"
+icon_command = ">"
+
+[icon]
+globs = []
+dirs  = []
+files = []
+exts  = []
+conds = []
+EOF
+}
+
 stage_yazi() {
   say "Three-column file browser with code, image and PDF previews."
   say "Opens with herdr prefix then f, or y in any shell."
@@ -1204,11 +1436,7 @@ stage_yazi() {
     fi
   done
   if $flavors_ok; then
-    install_file "$HOME/.config/yazi/theme.toml" <<'EOF'
-[flavor]
-dark = "catppuccin-mocha"
-light = "catppuccin-mocha"
-EOF
+    install_file "$HOME/.config/yazi/theme.toml" < <(yazi_theme)
   else
     SKIPPED+=("yazi Catppuccin flavours: ya pkg add yazi-rs/flavors:catppuccin-mocha")
   fi
@@ -1427,15 +1655,10 @@ TAIL
   fi
 }
 
-stage_herdr() {
-  say "herdr runs your terminals in a background server: one workspace per repo, tabs"
-  say "and panes inside, and a sidebar showing which agents are working, idle or"
-  say "waiting for you. Closing Ghostty never stops them."
-  note "terminal-notifier delivers herdr's desktop notifications (see the notifications stage)."
-  note "A small herdr plugin can also give every new workspace and worktree the same"
-  note "set of tabs. You choose the tabs at the end of this stage."
-  brew_formulae herdr terminal-notifier
-  install_file "$HOME/.config/herdr/config.toml" <<'EOF'
+# herdr_config: the full herdr config. The sidebar's agent indicators follow
+# the glyph switch.
+herdr_config() {
+  cat <<'EOF'
 # herdr config, written by ghostty-herdr-wizard.sh
 # Reference: https://herdr.dev/docs/configuration/
 # Apply changes: prefix Shift-R (or: herdr server reload-config)
@@ -1507,7 +1730,14 @@ width = "85%"
 height = "85%"
 
 [ui]
-status_indicators = "symbols"
+EOF
+  # "symbols" needs a Nerd Font; "dots" is herdr's own glyph-free default.
+  if [[ "$GLYPHS" == on ]]; then
+    printf 'status_indicators = "symbols"\n'
+  else
+    printf 'status_indicators = "dots"\n'
+  fi
+  cat <<'EOF'
 prompt_new_tab_name = false
 
 [ui.toast]
@@ -1524,6 +1754,17 @@ resume_agents_on_restore = true
 [worktrees]
 directory = "~/.herdr/worktrees"
 EOF
+}
+
+stage_herdr() {
+  say "herdr runs your terminals in a background server: one workspace per repo, tabs"
+  say "and panes inside, and a sidebar showing which agents are working, idle or"
+  say "waiting for you. Closing Ghostty never stops them."
+  note "terminal-notifier delivers herdr's desktop notifications (see the notifications stage)."
+  note "A small herdr plugin can also give every new workspace and worktree the same"
+  note "set of tabs. You choose the tabs at the end of this stage."
+  brew_formulae herdr terminal-notifier
+  install_file "$HOME/.config/herdr/config.toml" < <(herdr_config)
   say "Validating:"
   if herdr config check; then
     ok "herdr config is valid"
@@ -2003,12 +2244,12 @@ EOF
 
 STAGES=(
   "stage_preflight:Preflight"
-  "stage_install_ghostty:Install Ghostty and JetBrains Mono Nerd Font"
+  "stage_install_ghostty:Install Ghostty, choose icons or plain text"
   "stage_ghostty_config:Ghostty config"
   "stage_move_into_ghostty:Move into Ghostty"
   "stage_free_ctrl_space:Free up Ctrl-Space for herdr"
   "stage_toolbelt:CLI toolbelt"
-  "stage_starship:Starship prompt (pastel powerline)"
+  "stage_starship:Starship prompt"
   "stage_shell:Shell: history search, aliases, project jumper"
   "stage_git_diffs:Git diffs: delta and difftastic"
   "stage_lazygit:lazygit"
