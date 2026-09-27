@@ -25,8 +25,8 @@ saved_tools() { grep '^TOOLS=' "$STATE/choices.env" | cut -d= -f2-; }
 
 test_everything_is_ticked_by_default() {
   new_home
-  # banner, Enter on the selection screen, projects folder, create it, suggested tabs
-  choices_run '' '' "$H/repos" y ''
+  # banner, Enter on the selection screen, colours, prompt, projects folder, create it, suggested tabs
+  choices_run '' '' '' '' "$H/repos" y ''
   check "grep -q 'Ghostty, herdr and terminal-notifier' '$T/out'" "the mandatory three are named"
   check "[[ '$(saved_tools)' == $RECOMMENDED ]]" \
     "Enter keeps the recommended set (got '$(saved_tools)')"
@@ -36,7 +36,7 @@ test_everything_is_ticked_by_default() {
 
 test_each_tool_in_a_group_is_explained() {
   new_home
-  choices_run '' '' "$H/repos" y ''
+  choices_run '' '' '' '' "$H/repos" y ''
   local tool
   for tool in starship fzf fd eza bat zsh-autosuggestions zsh-syntax-highlighting \
     neovim tree-sitter-cli ripgrep LazyVim lazygit yazi poppler resvg gh gh-dash; do
@@ -47,8 +47,8 @@ test_each_tool_in_a_group_is_explained() {
 
 test_numbers_untick_and_tick_groups() {
   new_home
-  # untick icons, yazi and GitHub, then tick GitHub again
-  choices_run '' '1 7 8' 8 '' "$H/repos" y ''
+  # untick icons, yazi and GitHub, then tick GitHub again; colours, prompt, folder, create it, tabs
+  choices_run '' '1 7 8' 8 '' '' '' "$H/repos" y ''
   check "[[ '$(saved_tools)' == 'prompt,jumper,typing,editor,review,github,statusline' ]]" \
     "unticked groups are left out (got '$(saved_tools)')"
   check "grep -qx 'GLYPHS=off' '$STATE/choices.env'" "unticking icons is the plain-text switch"
@@ -59,7 +59,7 @@ test_numbers_untick_and_tick_groups() {
 test_a_leading_zero_is_still_a_group_number() {
   new_home
   # 08 unticks GitHub (not a bad octal number); 0 and 42 are ignored
-  choices_run '' '08 0 42' '' "$H/repos" y ''
+  choices_run '' '08 0 42' '' '' '' "$H/repos" y ''
   check "[[ '$(saved_tools)' == 'prompt,jumper,typing,editor,review,files,statusline' ]]" \
     "08 is group 8 (got '$(saved_tools)')"
   check "! grep -q 'value too great' '$T/out'" "no arithmetic error"
@@ -68,8 +68,8 @@ test_a_leading_zero_is_still_a_group_number() {
 
 test_nothing_selected_is_saved_as_none() {
   new_home
-  # no project jumper, so no projects folder question
-  choices_run '' '2 3 4 5 6 7 8 9' '' ''
+  # no prompt or project jumper, so only the colours and tabs questions
+  choices_run '' '2 3 4 5 6 7 8 9' '' '' ''
   check "[[ '$(saved_tools)' == none ]]" "no groups is saved as none (got '$(saved_tools)')"
   check "! grep -q 'Projects folder' '$T/out'" "without the project jumper there is no folder to ask about"
   cleanup

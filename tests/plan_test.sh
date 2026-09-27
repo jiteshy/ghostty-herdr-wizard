@@ -194,7 +194,7 @@ test_the_plan_lists_where_it_needs_you() {
 # saved_choices: answers from an earlier run, so choices offers to reuse them.
 saved_choices() {
   mkdir -p "$STATE" "$H/repos"
-  printf '%s\n' GLYPHS=off TOOLS=review TABS=none "PROJECTS_DIR=$H/repos" > "$STATE/choices.env"
+  printf '%s\n' GLYPHS=off TOOLS=review TABS=none THEME=auto "PROJECTS_DIR=$H/repos" > "$STATE/choices.env"
 }
 
 test_saying_no_to_the_plan_changes_nothing() {

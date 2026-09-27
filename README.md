@@ -23,7 +23,7 @@ After it runs, you can:
 - **Tabs (top).** This repo has four tabs: `agents`, `code`, `dev server` and `git review`. Each repo keeps its own tabs.
 - **Claude Code (large pane).** The two lines at the bottom show the model, the effort, the folder, the context used, the cost of the session, and your 5-hour and weekly limits.
 - **Codex (top right).** A second agent works in the same repo.
-- **Shell (bottom right).** The prompt shows the folder, the git branch and the time.
+- **Shell (bottom right).** The prompt shows the folder and the git branch.
 
 If you close Ghostty, the agents continue. When you open Ghostty again, your layout comes back. It also comes back after you restart the Mac.
 
@@ -63,15 +63,15 @@ The script does three types of work:
 2. It writes config files. If a file exists and is different, the script shows you the changes and asks you first. It keeps a copy of the old file in `~/.ghostty-herdr-wizard/backups/`.
 3. It tells you what to do for the steps that need a person. Examples: approve a macOS permission, or sign in to GitHub.
 
-**`choices`.** All the questions come first. First, what to install: Ghostty, herdr and terminal-notifier always, then one checkbox per group of tools that need each other (Nerd Font + icons, starship prompt, project jumper + fuzzy find, shell typing help, editor, lazygit for review, file manager, GitHub, Claude Code status line). All are ticked to start with. A group you untick is not installed and its step is skipped. Unticking icons gives plain text, which works in any font, so nothing shows as boxes in a terminal without a Nerd Font. Then the folder with your repos (only with the project jumper), and the tabs that new workspaces open with. The answers are saved, and the next run offers to use them again. Then the script shows its plan: how many tools it installs, which of your files it replaces, and the points where it needs you. Nothing happens until you say yes.
+**`choices`.** All the questions come first. First, what to install: Ghostty, herdr and terminal-notifier always, then one checkbox per group of tools that need each other (Nerd Font + icons, starship prompt, project jumper + fuzzy find, shell typing help, editor, lazygit for review, file manager, GitHub, Claude Code status line). All are ticked to start with. A group you untick is not installed and its step is skipped. Unticking icons gives plain text, which works in any font, so nothing shows as boxes in a terminal without a Nerd Font. Then the colours: follow macOS light and dark (the default), always dark, or leave your themes alone. Then the prompt, with both styles previewed in your current folder: Pure, Tokyo Night (only with icons), or leave your prompt alone. Then the folder with your repos (only with the project jumper), and the tabs that new workspaces open with. The answers are saved, and the next run offers to use them again. Then the script shows its plan: how many tools it installs, which of your files it replaces, and the points where it needs you. Nothing happens until you say yes.
 
 Each step checks your files right before it runs. If it is about to replace a file you already have, it says so and names the file. A copy goes to `~/.ghostty-herdr-wizard/backups/`, and `--revert` puts it back.
 
 **`install`.** Install everything with Homebrew in one go: Ghostty, herdr and the tools you picked. Tools of steps you skip with `--skip` are not installed.
 
-**`ghostty`, `herdr`, `macos`: the terminal and the agents.** Write the Ghostty config: the Catppuccin Mocha dark theme, Cmd keys that control herdr, and herdr in every new window. Make the Ctrl-Space key free for herdr, write its config, and connect Claude Code and Codex to it, so their conversations continue after a restart. Set up notifications and the quick terminal.
+**`ghostty`, `herdr`, `macos`: the terminal and the agents.** Write the Ghostty config: the Catppuccin theme (light or dark with macOS, unless you chose otherwise), Cmd keys that control herdr, and herdr in every new window. Make the Ctrl-Space key free for herdr, write its config, and connect Claude Code and Codex to it, so their conversations continue after a restart. Set up notifications and the quick terminal.
 
-**`prompt`, `shell`: the shell.** Set up the Starship prompt. Add history search, aliases for `bat`, `eza`, `fzf` and the other command-line tools, and a command that finds and opens your repos.
+**`prompt`, `shell`: the shell.** Set up the Starship prompt you picked. Add history search, aliases for `bat`, `eza`, `fzf` and the other command-line tools, and a command that finds and opens your repos.
 
 **`editor`, `review`, `yazi`, `github`: code and git.** Neovim with LazyVim, `lazygit` to stage and commit, `yazi` to browse files, and the GitHub CLI with `gh-dash` for pull requests.
 
