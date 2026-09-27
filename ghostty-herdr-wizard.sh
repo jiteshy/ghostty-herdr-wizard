@@ -258,6 +258,9 @@ selected() {
 
 # Homebrew lives in /opt/homebrew on Apple silicon and /usr/local on Intel. Put it
 # on PATH for this run, so a terminal opened before installing brew still works.
+# USER_PATH is the PATH from before that: the one the user's shells get, so the
+# Node found on it is the one herdr-hunk will run on (see node_gate).
+USER_PATH="$PATH"
 BREW_BIN="$(command -v brew 2>/dev/null || true)"
 for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
   if [[ -z "$BREW_BIN" && -x "$candidate" ]]; then BREW_BIN="$candidate"; fi
@@ -269,7 +272,13 @@ HERDR_BIN="$BREW_PREFIX/bin/herdr"
 LAUNCHER="$HOME/.local/bin/ghostty-launch"
 CHEATSHEET="$HOME/.config/ghostty-herdr-cheatsheet.md"
 STATUSLINE="$HOME/.claude/statusline.sh"
+HERDR_CONFIG="$HOME/.config/herdr/config.toml"
 HERDR_PLUGIN_DIR="$HOME/.herdr/plugins/worktree-tabs"
+# herdr-hunk, the review group's hunk-by-hunk diff review, and the Node it needs
+# (its package.json engines).
+HUNK_ID="jhochenbaum.hunkdiff"
+HUNK_REPO="jhochenbaum/herdr-hunk-diff"
+NODE_MIN="22.12"
 CHANGED=()   # files this run created or modified
 BACKED_UP=() # paths this run copied into the backup store
 KEPT=()      # changes --revert left alone because the user edited them since
@@ -363,6 +372,7 @@ missing_formulae() {
 #   <time>  JSONKEY  <path>  <key>  <prior|<absent>>  <written|<absent>|<exists>>
 #   <time>  GITKEY   <path>  <key>  <prior|<absent>>  <written>
 #   <time>  MANUAL   <what to undo in System Settings>  <settings deep link>
+#   <time>  PLUGIN   <herdr plugin id>  <new|pre-existing>
 #   <time>  UNDO     <undo_ function --revert calls at the end>
 # A backup ref is relative to $BACKUP_DIR. Lines are only ever appended.
 #
@@ -435,6 +445,14 @@ journal_write() {
 journal_manual() {
   [[ "$JOURNALING" == 1 ]] || return 0
   journal_append_once MANUAL "$1" "$2"
+}
+
+# journal_plugin ID new|pre-existing: record a herdr plugin the wizard installed
+# ("new") or found already there. --revert leaves plugins installed, like every
+# tool; the entry tells a later --uninstall which ones are the wizard's.
+journal_plugin() {
+  [[ "$JOURNALING" == 1 ]] || return 0
+  journal_append_once PLUGIN "$1" "$2"
 }
 
 # journal_undo FUNCTION: a stage with an effect no file entry expresses (herdr
@@ -598,6 +616,8 @@ revert_all() {
       GITKEY) revert_git_key "$f4" "$f5" "$f6" ;;
       MANUAL) manual=("$path"$'\t'"$f4" ${manual[@]+"${manual[@]}"}) ;;
       UNDO) hooks+=("$path") ;;
+      # Tools stay installed on --revert; its config is what gets undone.
+      PLUGIN) [[ "$f4" != new ]] || note "the herdr plugin $path stays installed (remove it: herdr plugin uninstall $path)" ;;
       *) warn "unrecognised journal entry '$type' for $path, skipped" ;;
     esac || failed=$((failed + 1))
   done 3< <(awk '{ line[NR] = $0 } END { for (i = NR; i > 0; i--) print line[i] }' "$JOURNAL")
@@ -1334,6 +1354,114 @@ preflight() {
   fi
 }
 
+# ── Node, for herdr-hunk ──────────────────────────────────────────────────
+# herdr-hunk needs Node $NODE_MIN or newer. The wizard only ever checks it:
+# Node is usually run by a version manager (nvm, fnm, volta, asdf, mise), a
+# Homebrew Node next to one fights it on PATH, upgrading breaks projects pinned
+# to an older one, and --revert could undo none of that. So an old Node greys
+# herdr-hunk out and names the command for the manager that installed it.
+
+# Every check looks at the user's own PATH, not the wizard's, which has
+# Homebrew put first: a Homebrew Node there may not be the one their shells run.
+
+# node_path: where the user's Node is. Fails if they have none.
+node_path() { (PATH="$USER_PATH"; command -v node); }
+
+# node_version: the user's Node version, e.g. v20.19.2. Fails if there is none.
+node_version() {
+  local node v
+  node=$(node_path) && v=$("$node" --version 2>/dev/null) && [[ "$v" =~ ^v[0-9]+\.[0-9]+ ]] || return 1
+  printf '%s' "$v"
+}
+
+# node_ok: true if the user's Node is new enough for herdr-hunk.
+node_ok() {
+  local v major minor
+  v=$(node_version) || return 1
+  v=${v#v}
+  major=${v%%.*}
+  minor=${v#*.}
+  minor=${minor%%.*}
+  (( 10#$major > ${NODE_MIN%.*} || (10#$major == ${NODE_MIN%.*} && 10#$minor >= ${NODE_MIN#*.}) ))
+}
+
+# node_manager: what put the Node on PATH there, going by where it lives:
+# nvm, fnm, volta, asdf, mise or "Homebrew <formula>". Empty if unknown.
+node_manager() {
+  local path target formula
+  path=$(node_path) || return 0
+  case "$path" in
+    */.nvm/*) echo nvm ;;
+    *fnm*) echo fnm ;;
+    */.volta/*) echo volta ;;
+    */.asdf/*) echo asdf ;;
+    *mise*) echo mise ;;
+    "$BREW_PREFIX"/opt/*/bin/node)
+      formula=${path#"$BREW_PREFIX"/opt/}
+      echo "Homebrew ${formula%%/*}"
+      ;;
+    "$BREW_PREFIX"/*)
+      # $BREW_PREFIX/bin/node links into the Cellar: ../Cellar/<formula>/<version>/bin/node
+      target=$(readlink "$path" 2>/dev/null || true)
+      formula=node
+      if [[ "$target" == *Cellar/* ]]; then
+        formula=${target#*Cellar/}
+        formula=${formula%%/*}
+      fi
+      echo "Homebrew $formula"
+      ;;
+  esac
+}
+
+# node_fix MANAGER: the command that gets MANAGER to a Node new enough for
+# herdr-hunk, and makes it the one new shells (and so herdr) get. Printed for
+# the user to run, never run by the wizard.
+node_fix() {
+  case "$1" in
+    nvm) echo "nvm install 22 && nvm use 22 && nvm alias default 22" ;;
+    fnm) echo "fnm install 22 && fnm default 22" ;;
+    volta) echo "volta install node@22" ;;
+    asdf) echo "asdf install nodejs latest:22 && asdf set -u nodejs latest:22" ;;
+    mise) echo "mise use -g node@22" ;;
+    "Homebrew node" | "Homebrew node@22") echo "brew upgrade ${1#Homebrew }" ;;
+    "Homebrew "*) echo "brew install node@22, then put $BREW_PREFIX/opt/node@22/bin on PATH in place of ${1#Homebrew }" ;;
+    *) echo "install Node $NODE_MIN or newer: https://nodejs.org, or a manager such as nvm" ;;
+  esac
+}
+
+# node_gate: true, silently, if Node is new enough for herdr-hunk. Otherwise
+# prints why not (the Node found and who manages it) and the command to fix it,
+# and fails.
+node_gate() {
+  node_ok && return 0
+  local v manager=""
+  if v=$(node_version); then
+    manager=$(node_manager)
+    printf 'needs Node %s+, you have %s%s\n' "$NODE_MIN" "$v" "${manager:+ (via $manager)}"
+  else
+    printf 'needs Node %s+, none found\n' "$NODE_MIN"
+  fi
+  printf '  %s\n' "$(node_fix "$manager")"
+  return 1
+}
+
+# hunk_tools: the review group's herdr-hunk line(s) for the selection screen.
+# Greyed out, with the fix, while Node is too old.
+hunk_tools() {
+  local gate line
+  if gate=$(node_gate); then
+    printf '%s\n' "herdr-hunk|review the agent's diff hunk by hunk, comment, send it back to the agent"
+    return 0
+  fi
+  printf '%s\n' "herdr-hunk|${DIM}needs newer Node${RESET}"
+  printf '%s\n' "|${DIM}review the agent's diff hunk by hunk, comment, send it back.${RESET}"
+  while IFS= read -r line; do
+    printf '|%s%s%s\n' "$DIM" "$line" "$RESET"
+  done <<< "$gate"
+  printf '|%sthen: bash %s --only review%s\n' "$DIM" "$SCRIPT_PATH" "$RESET"
+  printf '|%stab 4 stays a plain shell for now%s\n' "$DIM" "$RESET"
+}
+
 # cluster_tools KEY: what the group KEY brings, one "tool|what it gives you"
 # per line, as the selection screen lists it.
 cluster_tools() {
@@ -1353,7 +1481,8 @@ cluster_tools() {
       "tree-sitter-cli|builds the syntax parsers LazyVim uses" \
       "ripgrep|fast search inside files, for LazyVim's grep" \
       "fd|fast file finder, for LazyVim's file picker" ;;
-    review) printf '%s\n' "lazygit|a git UI: stage single lines or hunks, commit, branch, rebase" ;;
+    review) hunk_tools
+      printf '%s\n' "lazygit|a git UI: stage single lines or hunks, commit, branch, rebase" ;;
     files) printf '%s\n' "yazi|a file manager in the terminal, with previews" \
       "poppler|lets yazi preview PDFs" \
       "resvg|lets yazi preview SVG images" ;;
@@ -1873,6 +2002,8 @@ EOF
 }
 
 stage_review() {
+  say "herdr-hunk: review the agent's diff hunk by hunk, comment on lines, and send the"
+  say "comments back to the agent that wrote it. prefix Shift-H opens it; so does tab 4."
   say "lazygit: a full git UI. Stage single lines or hunks, commit, rebase, resolve conflicts."
   note "Opens with herdr prefix then d, or lg in any shell."
   stage_tools review
@@ -1884,7 +2015,84 @@ stage_review() {
     warn "couldn't find lazygit's config directory"
     SKIPPED+=("lazygit config not written")
   fi
+  printf '\n'
+  install_hunk
   pause
+}
+
+# hunk_ready: true if the review stage sets up herdr-hunk: the review group is
+# selected and Node is new enough.
+hunk_ready() { selected review && node_ok; }
+
+# hunk_config: herdr-hunk's own config. "overlay" opens a review over the
+# focused pane instead of beside it, so tab 4's review fills that tab.
+hunk_config() {
+  cat <<'EOF'
+# herdr-hunk config, written by ghostty-herdr-wizard.sh
+# Reference: https://github.com/jhochenbaum/herdr-hunk-diff#configuration
+[review]
+placement = "overlay"
+EOF
+}
+
+# install_hunk: herdr-hunk, its keybindings and its config, if Node allows.
+#
+# Its setup-keys writes the keys into herdr's config.toml, which the herdr stage
+# owns as a whole file. So the herdr config already leaves prefix+shift+a free
+# for it, the plugin writes its own binding syntax, and the result is journaled
+# as the wizard's new baseline: a re-run's herdr_config carries the keys over
+# unchanged, and --revert neither blames the user for them nor loses the
+# pre-wizard original.
+install_hunk() {
+  local gate plugins dir
+  if ! gate=$(node_gate); then
+    warn "herdr-hunk skipped: it $(head -n1 <<< "$gate")"
+    note "  $(sed -n 2p <<< "$gate" | sed 's/^ *//')"
+    note "then: bash $SCRIPT_PATH --only review"
+    [[ -n "$DEFAULT_TABS" ]] && note "tab 4 stays a plain shell for now"
+    SKIPPED+=("herdr-hunk needs Node $NODE_MIN+. Upgrade it, then: bash $SCRIPT_PATH --only review")
+    return 0
+  fi
+  # Captured first: under pipefail, grep -q quitting early could SIGPIPE herdr.
+  plugins=$(herdr plugin list 2>/dev/null) || plugins=""
+  if [[ "$plugins" == *"$HUNK_ID"* ]]; then
+    ok "herdr-hunk already installed"
+    journal_plugin "$HUNK_ID" pre-existing
+  else
+    cmd "herdr plugin install $HUNK_REPO"
+    # The plugin builds with node from PATH: the one node_gate checked.
+    if PATH="$USER_PATH:$PATH" herdr plugin install "$HUNK_REPO"; then
+      journal_plugin "$HUNK_ID" new
+    else
+      warn "couldn't install herdr-hunk"
+      SKIPPED+=("herdr-hunk: herdr plugin install $HUNK_REPO, then: bash $SCRIPT_PATH --only review")
+      return 0
+    fi
+  fi
+
+  cmd "herdr plugin action invoke setup-keys --plugin $HUNK_ID"
+  # The plugin copies the config to config.toml.hunkdiff-backup before writing,
+  # so that file is tracked too.
+  if track_file "$HERDR_CONFIG.hunkdiff-backup" \
+    track_file "$HERDR_CONFIG" herdr plugin action invoke setup-keys --plugin "$HUNK_ID"; then
+    ok "herdr-hunk keys: prefix Shift-H review, Shift-S send, Shift-C last commit, Shift-A staged"
+  else
+    warn "herdr-hunk couldn't add its keys"
+    SKIPPED+=("herdr-hunk keys: herdr plugin action invoke setup-keys --plugin $HUNK_ID")
+  fi
+
+  if [[ -n "$DEFAULT_TABS" ]]; then
+    dir=$(herdr plugin config-dir "$HUNK_ID" 2>/dev/null) || dir=""
+    [[ -n "$dir" ]] || dir="$HOME/.config/herdr/plugins/config/$HUNK_ID"
+    install_file "$dir/config.toml" < <(hunk_config)
+  fi
+
+  journal_undo undo_herdr
+  if herdr server reload-config >/dev/null 2>&1; then
+    ok "herdr reloaded its config"
+  else
+    note "herdr isn't running; it picks up the new keys when it next starts"
+  fi
 }
 
 stage_github() {
@@ -2445,7 +2653,8 @@ auto_switch = false
 # Claude Code keeps Ctrl-B for backgrounding commands.
 prefix = "ctrl+space"
 next_agent = "prefix+a"
-previous_agent = "prefix+shift+a"
+# Not Shift-A: herdr-hunk's setup-keys puts "review staged changes" there.
+previous_agent = "prefix+shift+v"
 previous_workspace = "prefix+comma"
 next_workspace = "prefix+period"
 last_pane = "prefix+space"
@@ -2489,6 +2698,24 @@ resume_agents_on_restore = true
 [worktrees]
 directory = "~/.herdr/worktrees"
 EOF
+  # herdr-hunk's keys: its setup-keys writes them into this file (see
+  # install_hunk). Carried over as it wrote them, so a re-run neither shows a
+  # diff nor offers to drop them.
+  local keys
+  if selected review && keys=$(hunk_keys_block "$HERDR_CONFIG") && [[ -n "$keys" ]]; then
+    printf '\n%s\n' "$keys"
+  fi
+  return 0
+}
+
+# hunk_keys_block FILE: the block of keybindings herdr-hunk's setup-keys
+# manages in FILE, markers included, if FILE has one.
+hunk_keys_block() {
+  [[ -f "$1" ]] || return 0
+  awk -v b="# BEGIN $HUNK_ID" -v e="# END $HUNK_ID" '
+    index($0, b) == 1 { on = 1 }
+    on { print }
+    on && index($0, e) == 1 { exit }' "$1"
 }
 
 stage_herdr() {
@@ -2500,7 +2727,7 @@ stage_herdr() {
   stage_tools herdr
   free_ctrl_space
   printf '\n'
-  install_file "$HOME/.config/herdr/config.toml" < <(herdr_config)
+  install_file "$HERDR_CONFIG" < <(herdr_config)
   journal_undo undo_herdr
   say "Validating:"
   if herdr config check; then
@@ -2731,7 +2958,7 @@ tour_navigation() {
   note "  Workspace  prefix m open repo · prefix , / . prev/next · prefix w list"
   note "  Tab        prefix c (Cmd-T) new · Cmd-1…9 jump · prefix n / p next/prev · prefix Shift-T rename"
   note "  Pane       Cmd-D right · Cmd-Shift-D down · prefix h j k l move · prefix z zoom · prefix x close"
-  note "  Agent      prefix a / A next/previous agent · prefix o latest notification"
+  note "  Agent      prefix a / Shift-V next/previous agent · prefix o latest notification"
   note "  Anything   prefix g (Cmd-P) goto picker · prefix Space back to the last pane"
   note "  Popups     prefix d lazygit · f yazi · i GitHub PRs   (q closes)"
   note "  Mouse      click sidebar rows, tabs and panes; drag borders to resize"
@@ -2759,7 +2986,7 @@ tour_agents() {
   step "Ask repo B's Claude: 'run git status and summarise it'. Don't approve the prompt yet."
   step "Come back here (prefix g → tour). The sidebar marks that agent as waiting, and a macOS"
   step "banner appears. Clicking it brings Ghostty forward. (No banner for the tab you're looking at.)"
-  step "prefix a jumps to the next agent (prefix A goes back). Approve the prompt."
+  step "prefix a jumps to the next agent (prefix Shift-V goes back). Approve the prompt."
   step "prefix o jumps to whatever the latest notification is about."
   printf '\n'
   say "Two agents on one repo without clashing:"
@@ -2827,6 +3054,10 @@ tour_review() {
   step "In nvim: Space Space, open README.md. It updates on its own; the gutter marks the change."
   printf '\n'
   say "Pick a review style:"
+  if hunk_ready; then
+    step "herdr-hunk: prefix Shift-H, or tab 4. Comment on a line, then prefix Shift-S sends"
+    step "your comments to the agent that made the change."
+  fi
   step "Terminal: in any pane run  gd  for the plain git diff. q quits."
   step "Neovim: Space g v. Changed files left, before/after right. Space g V closes."
   step "lazygit: prefix d. Enter on the file, space stages a line or hunk."
@@ -2898,13 +3129,15 @@ tour_habits() {
 
 # cheatsheet: the cheat sheet `keys` opens, with only the selected tools. A
 # line of cheatsheet_text tagged {KEY} is kept (untagged) only while the group
-# KEY is selected; {popups} while any tool with a herdr popup is.
+# KEY is selected; {popups} while any tool with a herdr popup is, and {hunk}
+# while herdr-hunk is set up.
 cheatsheet() {
   local entry keep=" "
   for entry in "${CLUSTERS[@]}"; do
     selected "${entry%%:*}" && keep+="${entry%%:*} "
   done
   if selected review || selected files || selected github; then keep+="popups "; fi
+  if hunk_ready; then keep+="hunk "; fi
   cheatsheet_text | awk -v keep="$keep" '
     match($0, /^[{][a-z]+[}]/) {
       line = substr($0, RLENGTH + 1)
@@ -2940,7 +3173,7 @@ Open any time with `keys`. **prefix** = Ctrl-Space: press, release, then the key
 | prefix `,` / `.` · Cmd-Shift-[ / ] | previous / next workspace |
 | prefix `w` | workspace list |
 | prefix `g` · Cmd-P | goto picker: any workspace, tab or agent |
-| prefix `a` / `A` | next / previous agent (find the one waiting for you) |
+| prefix `a` / `Shift-V` | next / previous agent (find the one waiting for you) |
 | prefix `o` | jump to the latest notification |
 | prefix `Shift-G` | new git worktree: a second agent on the same repo, own branch |
 | prefix `Shift-O` | open an existing worktree of the selected repo |
@@ -3001,6 +3234,15 @@ re-running the wizard with `--only choices,herdr`, or edit
 {review} | `lg` | lazygit |
 | `gd` | git diff |
 
+{hunk} ## Reviewing the agent's diff (herdr-hunk)
+{hunk}
+{hunk} | Keys | Does |
+{hunk} |---|---|
+{hunk} | prefix `Shift-H` | review changes (tab 4 opens one by itself) |
+{hunk} | prefix `Shift-S` | send your review comments to the agent |
+{hunk} | prefix `Shift-C` | review the last commit |
+{hunk} | prefix `Shift-A` | review staged changes |
+{hunk}
 {review} ## lazygit
 {review}
 {review} `space` stage · `enter` on a file to stage single lines · `c` commit · `P` push · `p` pull · `d` discard · `?` help
@@ -3031,7 +3273,7 @@ STAGES=(
   "prompt:Starship prompt"
   "shell:Shell: tools, history search, aliases, project jumper"
   "editor:Neovim + LazyVim"
-  "review:Reviewing diffs: lazygit"
+  "review:Reviewing diffs: herdr-hunk and lazygit"
   "yazi:yazi file manager"
   "github:GitHub CLI and gh-dash"
   "statusline:Claude Code status line"
