@@ -233,6 +233,33 @@ choice_set() {
 GLYPHS=$(choice_get GLYPHS || true)
 [[ "$GLYPHS" == off ]] || GLYPHS=on
 
+# PREFIX: herdr's prefix key. "ctrl-space" keeps Ctrl-B free for Claude Code's
+# backgrounding but needs one macOS setting changed; "ctrl-b" is herdr's own
+# default, needing no macOS changes but clashing with that shortcut. Asked in
+# the choices stage; anything else (including an old choices file without it)
+# means the default.
+PREFIX=$(choice_get PREFIX || true)
+[[ "$PREFIX" == ctrl-b ]] || PREFIX=ctrl-space
+# prefix_herdr/prefix_byte/prefix_name: the choice in herdr's spelling, the
+# byte Ghostty's Cmd shortcuts send (\x00 is Ctrl-Space, \x02 Ctrl-B), and the
+# name the docs print.
+prefix_herdr() { if [[ "$PREFIX" == ctrl-b ]]; then printf 'ctrl+b'; else printf 'ctrl+space'; fi; }
+prefix_byte() { if [[ "$PREFIX" == ctrl-b ]]; then printf '\\x02'; else printf '\\x00'; fi; }
+prefix_name() { if [[ "$PREFIX" == ctrl-b ]]; then printf 'Ctrl-B'; else printf 'Ctrl-Space'; fi; }
+
+# THEME: colour mode for Ghostty, herdr, Neovim and yazi. "system" follows the
+# macOS appearance, "dark" pins the dark palette, "leave" writes no theme
+# setting anywhere. Asked in the choices stage; anything else means the default.
+THEME=$(choice_get THEME || true)
+case "$THEME" in dark|leave) ;; *) THEME=system ;; esac
+
+# PROMPT_STYLE: which hand-written prompt to install. "pure" is plain text,
+# "tokyo" is powerline, "leave" keeps the existing prompt and writes nothing.
+# Asked in the choices stage when the prompt group is selected; anything else
+# (including an old choices file without it) means pure.
+PROMPT_STYLE=$(choice_get PROMPT_STYLE || true)
+case "$PROMPT_STYLE" in pure|tokyo|leave) ;; *) PROMPT_STYLE=pure ;; esac
+
 # The groups of tools the choices stage offers, each one checkbox: "key:title:
 # stage". Tools are grouped only where they need each other. A declined group
 # is neither installed nor configured, and a stage runs only when a group it
@@ -357,17 +384,31 @@ current_projects_dir() {
 in_ghostty() { [[ "${TERM_PROGRAM:-}" == "ghostty" || -n "${HERDR_ENV:-}" ]]; }
 
 # brew_formulae NAME...: install only the formulae not already present.
-# With --quiet first, say nothing when they are all there.
+# With --quiet first, say nothing when they are all there. Journals each one
+# as new or pre-existing, so --uninstall knows which are the wizard's. Only
+# journals "new" when the install worked: run swallows the failure, so the
+# status is checked here instead.
 brew_formulae() {
-  local missing quiet=false
+  local missing quiet=false f
   if [[ "${1:-}" == --quiet ]]; then quiet=true; shift; fi
   (( $# )) || return 0
   missing=$(missing_formulae "$@")
   if [[ -z "$missing" ]]; then
     $quiet || ok "already installed: $*"
+    for f in "$@"; do journal_brew "$f" pre-existing; done
   else
     # shellcheck disable=SC2086 # one formula per word
-    run brew install $missing
+    cmd brew install $missing
+    # shellcheck disable=SC2086
+    if brew install $missing; then
+      for f in "$@"; do
+        if grep -qx "$f" <<< "$missing"; then journal_brew "$f" new
+        else journal_brew "$f" pre-existing; fi
+      done
+    else
+      warn "failed: brew install $missing"
+      SKIPPED+=("re-run manually: brew install $missing")
+    fi
   fi
 }
 
@@ -380,6 +421,23 @@ missing_formulae() {
   done
 }
 
+# brew_cask NAME: install the cask unless Homebrew already has it, journaling
+# it new or pre-existing like the formulae, so --uninstall knows.
+brew_cask() {
+  if brew list --cask 2>/dev/null | grep -qx "$1"; then
+    ok "$1 already installed"
+    journal_brew "$1" pre-existing cask
+  else
+    cmd "brew install --cask $1"
+    if brew install --cask "$1"; then
+      journal_brew "$1" new cask
+    else
+      warn "failed: brew install --cask $1"
+      SKIPPED+=("re-run manually: brew install --cask $1")
+    fi
+  fi
+}
+
 # ── Journal and backup store ──────────────────────────────────────────────
 # journal.tsv, one tab-separated line per change, oldest first:
 #   <time>  MODIFY   <path>  <backup ref>  <sha256 written, or "dir">
@@ -389,6 +447,8 @@ missing_formulae() {
 #   <time>  GITKEY   <path>  <key>  <prior|<absent>>  <written>
 #   <time>  MANUAL   <what to undo in System Settings>  <settings deep link>
 #   <time>  PLUGIN   <herdr plugin id>  <new|pre-existing>
+#   <time>  BREW     <formula|cask>  <new|pre-existing>  <formula|cask>
+#   <time>  PKG      <manager:package>  <new|pre-existing>
 #   <time>  UNDO     <undo_ function --revert calls at the end>
 # A backup ref is relative to $BACKUP_DIR. Lines are only ever appended.
 #
@@ -469,6 +529,23 @@ journal_manual() {
 journal_plugin() {
   [[ "$JOURNALING" == 1 ]] || return 0
   journal_append_once PLUGIN "$1" "$2"
+}
+
+# journal_brew NAME new|pre-existing [formula|cask]: record a Homebrew package
+# the wizard installed ("new") or found already there. --revert leaves tools
+# installed; --uninstall removes only "new" ones, casks with --cask.
+journal_brew() {
+  [[ "$JOURNALING" == 1 ]] || return 0
+  journal_append_once BREW "$1" "$2" "${3:-formula}"
+}
+
+# journal_pkg MANAGER PACKAGE new|pre-existing: record a package from another
+# manager (yazi flavours, bat themes). --uninstall removes "new" ones through
+# that manager. Manager and package share one field so one manager's packages
+# never shadow each other in the append-once check.
+journal_pkg() {
+  [[ "$JOURNALING" == 1 ]] || return 0
+  journal_append_once PKG "$1:$2" "$3"
 }
 
 # journal_undo FUNCTION: a stage with an effect no file entry expresses (herdr
@@ -633,6 +710,8 @@ revert_all() {
       MANUAL) manual=("$path"$'\t'"$f4" ${manual[@]+"${manual[@]}"}) ;;
       UNDO) hooks+=("$path") ;;
       # Tools stay installed on --revert; its config is what gets undone.
+      # Packages are --uninstall's business, not --revert's.
+      BREW | PKG) : ;;
       PLUGIN) [[ "$f4" != new ]] || note "the herdr plugin $path stays installed (remove it: herdr plugin uninstall $path)" ;;
       *) warn "unrecognised journal entry '$type' for $path, skipped" ;;
     esac || failed=$((failed + 1))
@@ -721,6 +800,80 @@ revert_restore() {
   mv "$dir/manifest" "$dir/manifest.restored"
 }
 
+# uninstall_candidates: every package the wizard installed, one per line as
+# KIND<TAB>TARGET<TAB>DESCRIPTION. Only journaled-"new" packages qualify:
+# pre-existing ones are never removal candidates, and Node is never touched
+# by this flag (see the herdr-hunk slice for why).
+uninstall_candidates() {
+  [[ -f "$JOURNAL" ]] || return 0
+  local type f3 f4 f5 manager package
+  awk -F'\t' '$2 == "BREW" || $2 == "PLUGIN" || $2 == "PKG" { print $2"\t"$3"\t"$4"\t"$5 }' "$JOURNAL" |
+  while IFS=$'\t' read -r type f3 f4 f5; do
+    [[ "$f4" == new ]] || continue
+    case "$type" in
+      BREW)
+        [[ "$f3" == node* ]] && continue
+        if [[ "$f5" == cask ]]; then
+          printf 'cask\t%s\t%s (Homebrew cask)\n' "$f3" "$f3"
+        else
+          printf 'formula\t%s\t%s (Homebrew formula)\n' "$f3" "$f3"
+        fi ;;
+      PLUGIN) printf 'plugin\t%s\t%s (herdr plugin)\n' "$f3" "$f3" ;;
+      PKG)
+        manager=${f3%%:*}; package=${f3#*:}
+        if [[ "$manager" == ya ]]; then
+          printf 'ya\t%s\tyazi package %s\n' "$package" "$package"
+        elif [[ "$manager" == bat ]]; then
+          printf 'bat\t%s\tbat theme %s\n' "$package" "$package"
+        fi ;;
+    esac
+  done
+}
+
+# bat_remove_theme FILE: remove a wizard-downloaded bat theme through bat's
+# own workflow: delete the theme file, then rebuild bat's cache.
+bat_remove_theme() {
+  local dir
+  dir="$(bat --config-dir 2>/dev/null)/themes" || dir=""
+  if ! command -v bat >/dev/null 2>&1 || [[ ! -f "$dir/$1" ]]; then
+    warn "bat theme $1 is already gone"
+    return 0
+  fi
+  rm -f "$dir/$1" && run bat cache --build && ok "removed bat theme $1"
+}
+
+# uninstall_packages: remove what the wizard installed, asking once per
+# package. Runs the full --revert first: removing binaries while configs
+# still reference them would leave every new shell erroring.
+uninstall_packages() {
+  local candidates=() line kind target display
+  # Read before reverting: a clean revert archives the journal.
+  while IFS= read -r line; do candidates+=("$line"); done < <(uninstall_candidates)
+  revert_all
+  if (( ${#candidates[@]} == 0 )); then
+    ok "nothing installed by the wizard is left to remove"
+    return 0
+  fi
+  printf '\n'
+  say "The wizard installed these. Each removal asks first:"
+  for line in "${candidates[@]}"; do
+    kind=${line%%$'\t'*}
+    target=${line#*$'\t'}; target=${target%%$'\t'*}
+    display=${line##*$'\t'}
+    if confirm "Remove $display?"; then
+      case "$kind" in
+        formula) run brew uninstall "$target" ;;
+        cask) run brew uninstall --cask "$target" ;;
+        plugin) run herdr plugin uninstall "$target" ;;
+        ya) run ya pkg delete "$target" ;;
+        bat) bat_remove_theme "$target" ;;
+      esac
+    else
+      note "keeping $display"
+    fi
+  done
+}
+
 # revert_checklist "DESCRIPTION<tab>LINK"...: the System Settings changes the
 # user has to undo by hand, numbered, each offering to open its settings pane.
 revert_checklist() {
@@ -754,6 +907,21 @@ revert_modify() {
 }
 
 # revert_create PATH SHA STAMP: move what the wizard created out of the way.
+# rmdir_empty_parents PATH: remove PATH's parent chain while it is empty,
+# stopping at $HOME. Only directories the wizard emptied can go: rmdir
+# refuses non-empty ones, so pre-existing content is never at risk. This keeps
+# the revert promise ("leave no trace"): without it, every relocated creation
+# leaves its wizard-made folders behind. --revert --restore recreates parents
+# with mkdir -p, so restoring still works.
+rmdir_empty_parents() {
+  local dir
+  dir=$(dirname "$1")
+  while [[ "$dir" == "$HOME"/* && "$dir" != "$HOME" ]]; do
+    rmdir "$dir" 2>/dev/null || return 0
+    dir=$(dirname "$dir")
+  done
+}
+
 revert_create() {
   local path="$1" hash="$2" stamp="$3"
   if [[ ! -e "$path" ]]; then
@@ -763,6 +931,7 @@ revert_create() {
   revert_drift_ok "$path" "$hash" /dev/null || return 0
   if relocate "$path" "$stamp"; then
     ok "moved $path (the wizard created it)"
+    rmdir_empty_parents "$path"
     return 0
   fi
   warn "couldn't move $path aside, left as is"
@@ -1074,9 +1243,26 @@ herdr_integration_current() {
   herdr integration status 2>/dev/null | grep "^$1: current" >/dev/null
 }
 
-# ghostty_config [autostart]: the full Ghostty config. "autostart" makes every
-# new window go through ghostty-launch, which decides between herdr and a shell.
-ghostty_config() {
+# ghostty_theme: the Look section's theme lines. System follows macOS through
+# Ghostty's light:/dark: qualifiers; dark pins Mocha; leave writes nothing.
+ghostty_theme() {
+  case "$THEME" in
+    system)
+      printf '%s\n' '# ── Look ──────────────────────────────────────────────' \
+        '# Follows macOS: light theme in light mode, dark in dark mode.' \
+        'theme = light:Catppuccin Latte,dark:Catppuccin Mocha' ;;
+    dark)
+      printf '%s\n' '# ── Look ──────────────────────────────────────────────' \
+        '# Always dark, same palette as herdr, nvim, bat and yazi.' \
+        'theme = Catppuccin Mocha' ;;
+  esac
+}
+
+# ghostty_config_body [autostart]: the full Ghostty config. "autostart" makes
+# every new window go through ghostty-launch, which decides between herdr and
+# a shell. Written with Ctrl-Space's byte; ghostty_config swaps it when the
+# prefix is Ctrl-B.
+ghostty_config_body() {
   cat <<'EOF'
 # Ghostty config, written by ghostty-herdr-wizard.sh
 # Reference: https://ghostty.org/docs/config/reference
@@ -1092,9 +1278,9 @@ EOF
   cat <<'EOF'
 font-size = 14
 
-# ── Look ──────────────────────────────────────────────
-# Always dark, same palette as herdr, nvim, bat and yazi.
-theme = Catppuccin Mocha
+EOF
+  ghostty_theme
+  cat <<'EOF'
 window-padding-x = 10
 window-padding-y = 8
 window-padding-balance = true
@@ -1161,6 +1347,17 @@ EOF
   fi
 }
 
+# ghostty_config [autostart]: the config with the chosen prefix. Every \x00 in
+# the text is the prefix byte Ctrl-Space sends; with Ctrl-B it becomes \x02,
+# and the Ctrl-Space name in the comment follows it.
+ghostty_config() {
+  if [[ "$PREFIX" == ctrl-b ]]; then
+    ghostty_config_body "$@" | sed -e 's/\\x00/\\x02/g' -e 's/Ctrl-Space/Ctrl-B/g'
+  else
+    ghostty_config_body "$@"
+  fi
+}
+
 install_launcher() {
   install_file "$LAUNCHER" <<'EOF'
 #!/bin/zsh
@@ -1169,7 +1366,7 @@ install_launcher() {
 #
 #   herdr not open in any window    → attach herdr (opening Ghostty lands you in herdr)
 #   herdr already open elsewhere    → plain shell (Cmd-N is the "without herdr" shortcut)
-#   you detach herdr (Ctrl-Space q) → this window carries on as a plain shell
+#   you detach herdr (prefix q) → this window carries on as a plain shell
 #   GHOSTTY_NO_HERDR=1 is set       → always a plain shell
 # Ghostty starts this with macOS's minimal PATH. herdr needs Homebrew's, e.g. to
 # find terminal-notifier for desktop notifications.
@@ -1205,51 +1402,76 @@ write_ghostty_config() {
   fi
 }
 
-# starship_config: the pastel-powerline preset with the Apple logo in place of
-# the username, plus Deno and Python versions next to Node and Bun.
-#
-# The preset only sets backgrounds, so text takes the terminal's default colour
-# and is hard to read in both light and dark mode. Each segment gets a fixed
-# text colour instead, with its background shifted until contrast is at least
-# 5:1 (WCAG AA is 4.5): white on darker shades, #1E1E2E on lighter ones.
-#
-# With the glyph switch off: starship's plain-text-symbols preset instead, which
-# spells symbols out ("git ", "nodejs ") so the prompt needs no Nerd Font.
-# (Its no-nerd-font preset still shows a glyph for the git branch.)
-starship_config() {
-  if [[ "$GLYPHS" != on ]]; then
-    starship preset plain-text-symbols
-    return
-  fi
-  local apple=$'\xef\x85\xb9'
-  starship preset pastel-powerline | awk -v apple="$apple" '
-    $0 == "$username\\" { next }
-    $0 == "$bun\\" { print; print "$deno\\"; print "$python\\"; next }
-    /^\[os\]$/ { in_os = 1 }
-    in_os && /^disabled = true/ {
-      print "disabled = false"
-      print "format = \"[$symbol ]($style)\""
-      print ""
-      print "[os.symbols]"
-      print "Macos = \"" apple "\""
-      in_os = 0
-      next
-    }
-    { print }
-    END {
-      print ""
-      print "[deno]"
-      print "style = \"bg:#86BBD8\""
-      print "format = \x27[ $symbol ($version) ]($style)\x27"
-      print ""
-      print "[python]"
-      print "style = \"bg:#86BBD8\""
-      print "format = \x27[ $symbol ($version) ]($style)\x27"
-    }' | sed -E \
-      -e 's/#DA627D/#B8476B/g; s/#FCA17D/#FDB598/g; s/#86BBD8/#A3CBE1/g; s/#06969A/#057C7F/g' \
-      -e 's/^style = "bg:(#9A348E|#B8476B|#057C7F|#33658A)"/style = "fg:#FFFFFF bg:\1"/' \
-      -e 's/^style = "bg:(#FDB598|#A3CBE1)"/style = "fg:#1E1E2E bg:\1"/' \
-      -e 's/^(style_(user|root)) = "bg:#9A348E"/\1 = "fg:#FFFFFF bg:#9A348E"/'
+# TOKYO_SEP: the powerline separator (U+E0B0, a Private Use glyph) joining the
+# Tokyo Night segments. Written as bytes so the script stays plain ASCII; the
+# style is only offered with glyphs on, so it is never written without a font.
+TOKYO_SEP=$'\xee\x82\xb0'
+
+# pure_config: the plain-text prompt. Only the current folder and the git
+# branch: no username, hostname, runtimes or clock. Nothing in it needs a
+# Nerd Font.
+pure_config() {
+  cat <<'EOF'
+# Pure-style prompt, written by ghostty-herdr-wizard.sh.
+# Shows only the current folder and the git branch.
+format = "$directory$git_branch$character"
+
+[directory]
+style = "bold blue"
+format = "[$path]($style)"
+truncation_length = 3
+truncate_to_repo = true
+
+[git_branch]
+style = "bold purple"
+format = "on [$branch]($style) "
+
+[character]
+success_symbol = "[❯](bold green)"
+error_symbol = "[✗](bold red)"
+EOF
+}
+
+# tokyo_config: the powerline prompt. Same two segments as pure, joined by
+# powerline separators, so it needs the Nerd Font.
+tokyo_config() {
+  cat <<'EOF' | sed "s/@SEP@/$TOKYO_SEP/g"
+# Tokyo Night-style powerline prompt, written by ghostty-herdr-wizard.sh.
+# Shows only the current folder and the git branch.
+format = "$directory$git_branch$character"
+
+[directory]
+style = "fg:#1a1b26 bg:#7aa2f7"
+format = "[ $path ]($style)"
+truncation_length = 3
+truncate_to_repo = true
+
+[git_branch]
+style = "fg:#1a1b26 bg:#bb9af7"
+format = "[@SEP@](fg:#7aa2f7 bg:#bb9af7)[ $branch ]($style)[@SEP@](fg:#bb9af7)"
+
+[character]
+success_symbol = "[❯](bold green)"
+error_symbol = "[✗](bold red)"
+EOF
+}
+
+# prompt_config: the config for the chosen style. Needs no starship binary:
+# both configs are shipped text, not upstream presets.
+prompt_config() {
+  if [[ "$PROMPT_STYLE" == tokyo ]]; then tokyo_config; else pure_config; fi
+}
+
+# prompt_preview STYLE: render STYLE live with starship in the user's actual
+# current folder, through a temp config so nothing is installed.
+prompt_preview() {
+  local cfg
+  cfg=$(mktemp) || return 1
+  if [[ "$1" == tokyo ]]; then tokyo_config > "$cfg"; else pure_config > "$cfg"; fi
+  STARSHIP_CONFIG="$cfg" STARSHIP_SHELL=bash starship prompt 2>/dev/null
+  local status=$?
+  rm -f "$cfg"
+  return "$status"
 }
 
 statusline_script() {
@@ -1484,7 +1706,7 @@ cluster_tools() {
     icons) printf '%s\n' "Nerd Font|JetBrains Mono Nerd Font, unless you have it: file, folder and git" \
       "|icons in the prompt, ls, yazi, Neovim, lazygit, herdr and the status line." \
       "|Unticked: plain text that works in any font (e.g. iTerm), no font install" ;;
-    prompt) printf '%s\n' "starship|a prompt showing folder, git branch and runtime versions" ;;
+    prompt) printf '%s\n' "starship|a prompt showing only folder and git branch" ;;
     jumper) printf '%s\n' "fzf|fuzzy search: Ctrl-R history, Ctrl-T files, and the project picker" \
       "fd|fast file finder behind that search" \
       "eza|ls with git status and a tree view" \
@@ -1571,6 +1793,97 @@ ask_tools() {
   printf '\n'
 }
 
+# ask_prefix: herdr's prefix key, with the trade-off stated. Ctrl-Space is the
+# default; Ctrl-B skips the free-the-prefix step entirely. Sets and saves PREFIX.
+ask_prefix() {
+  local answer
+  say "${BOLD}herdr prefix key${RESET}"
+  note "Every herdr command starts with the prefix: press it, release it, then the key."
+  note "1) Ctrl-Space keeps Ctrl-B free for Claude Code's backgrounding, but macOS"
+  note "   uses Ctrl-Space to switch keyboard input, so one setting changes there. (suggested)"
+  note "2) Ctrl-B is herdr's own default: no macOS changes, but it clashes with"
+  note "   Claude Code's Ctrl-B backgrounding shortcut."
+  printf '  %schoice [1]:%s ' "$BOLD" "$RESET"
+  answer=""
+  read -r answer || true
+  case "${answer:-1}" in 2) PREFIX=ctrl-b ;; *) PREFIX=ctrl-space ;; esac
+  choice_set PREFIX "$PREFIX"
+  printf '\n'
+}
+
+# ask_theme: colour mode for Ghostty, herdr, Neovim and yazi, defaulting to
+# following the system. Sets and saves THEME.
+ask_theme() {
+  local answer
+  say "${BOLD}Colour mode${RESET}"
+  note "Ghostty, herdr, Neovim and yazi can follow macOS, stay dark, or keep your themes."
+  note "1) follow the system appearance (suggested)"
+  note "2) always dark: Catppuccin Mocha everywhere"
+  note "3) leave my themes alone: the wizard writes no theme setting"
+  printf '  %schoice [1]:%s ' "$BOLD" "$RESET"
+  answer=""
+  read -r answer || true
+  case "${answer:-1}" in 2) THEME=dark ;; 3) THEME=leave ;; *) THEME=system ;; esac
+  choice_set THEME "$THEME"
+  if [[ "$THEME" == system ]]; then
+    note "One caveat: the terminal, multiplexer and file manager switch cleanly, but an"
+    note "already-open Neovim may need a restart to repaint after the system switches."
+  fi
+  printf '\n'
+}
+
+# prompt_preview_lines PREFIX: the lines of a live preview, indented.
+prompt_preview_lines() {
+  prompt_preview "$1" 2>/dev/null | sed 's/^/    /'
+}
+
+# ask_prompt_style: which prompt to install. Both styles are previewed live,
+# rendered from the user's actual current folder, before the choice. The
+# powerline style has no separators without the Nerd Font, so glyphs off
+# offers only pure. Sets and saves PROMPT_STYLE; skipped when the prompt
+# group is declined.
+ask_prompt_style() {
+  selected prompt || return 0
+  local answer dir branch
+  say "${BOLD}Prompt style${RESET}"
+  note "Two hand-written prompts. Both show only the current folder and git branch."
+  if command -v starship >/dev/null 2>&1; then
+    say "1) pure           (suggested)"
+    prompt_preview_lines pure
+    if [[ "$GLYPHS" == on ]]; then
+      say "2) tokyo night"
+      prompt_preview_lines tokyo
+      say "3) leave my prompt alone"
+    else
+      say "2) leave my prompt alone"
+    fi
+  else
+    dir=${PWD/#$HOME/\~}
+    branch=$(git branch --show-current 2>/dev/null || true)
+    note "starship isn't installed yet, so these layouts use your actual folder${branch:+ and branch}:"
+    say "1) pure           (suggested)"
+    printf '    %s%s\n' "$dir" "${branch:+ on $branch}"
+    printf '    ❯\n'
+    if [[ "$GLYPHS" == on ]]; then
+      say "2) tokyo night"
+      printf '    %s%s\n' "$dir" "${branch:+ on $branch}"
+      say "3) leave my prompt alone"
+    else
+      say "2) leave my prompt alone"
+    fi
+  fi
+  printf '  %schoice [1]:%s ' "$BOLD" "$RESET"
+  answer=""
+  read -r answer || true
+  if [[ "$GLYPHS" == on ]]; then
+    case "${answer:-1}" in 2) PROMPT_STYLE=tokyo ;; 3) PROMPT_STYLE=leave ;; *) PROMPT_STYLE=pure ;; esac
+  else
+    case "${answer:-1}" in 2) PROMPT_STYLE=leave ;; *) PROMPT_STYLE=pure ;; esac
+  fi
+  choice_set PROMPT_STYLE "$PROMPT_STYLE"
+  printf '\n'
+}
+
 # ask_projects_dir: where the user keeps their repos. Sets and saves
 # PROJECTS_DIR; Enter keeps the current answer.
 ask_projects_dir() {
@@ -1597,7 +1910,8 @@ ask_projects_dir() {
 # choices_saved: true once every question in the choices stage has an answer.
 choices_saved() {
   choice_get GLYPHS >/dev/null && choice_get TOOLS >/dev/null && choice_get TABS >/dev/null &&
-    { ! selected jumper || choice_get PROJECTS_DIR >/dev/null; }
+    { ! selected jumper || choice_get PROJECTS_DIR >/dev/null; } &&
+    { ! selected prompt || choice_get PROMPT_STYLE >/dev/null; }
 }
 
 # show_choices: last run's answers, one per line.
@@ -1606,6 +1920,9 @@ show_choices() {
   tools=${tools%,}
   note "  icons            $GLYPHS"
   note "  tools            ${tools:-none beyond Ghostty and herdr}"
+  note "  prefix           $(prefix_name)"
+  note "  theme            $THEME"
+  selected prompt && note "  prompt style     $PROMPT_STYLE"
   selected jumper && note "  projects folder  $(current_projects_dir)"
   note "  default tabs     ${DEFAULT_TABS:-none, one plain tab}"
 }
@@ -1630,6 +1947,9 @@ stage_choices() {
     printf '\n'
   fi
   ask_tools
+  ask_prefix
+  ask_theme
+  ask_prompt_style
   if selected jumper; then ask_projects_dir; fi
   ask_default_tabs
 }
@@ -1659,7 +1979,7 @@ plan_gate() {
 # Font is a cask, so the install stage handles icons itself.
 cluster_formulae() {
   case "$1" in
-    prompt) echo starship ;;
+    prompt) [[ "$PROMPT_STYLE" != leave ]] && echo starship ;;
     jumper) echo fzf fd eza bat ;;
     typing) echo zsh-autosuggestions zsh-syntax-highlighting ;;
     editor) echo neovim tree-sitter-cli ripgrep fd ;;
@@ -1715,10 +2035,19 @@ bat_themes() {
   dir="$(bat --config-dir)/themes"
   mkdir -p "$dir"
   for flavour in Mocha Latte; do
-    [[ -f "$dir/Catppuccin $flavour.tmTheme" ]] && continue
-    run curl -fsSL -o "$dir/Catppuccin $flavour.tmTheme" \
-      "https://raw.githubusercontent.com/catppuccin/bat/main/themes/Catppuccin%20$flavour.tmTheme"
-    fetched=true
+    if [[ -f "$dir/Catppuccin $flavour.tmTheme" ]]; then
+      journal_pkg bat "Catppuccin $flavour.tmTheme" pre-existing
+      continue
+    fi
+    cmd "curl -fsSL -o $dir/Catppuccin $flavour.tmTheme https://raw.githubusercontent.com/catppuccin/bat/main/themes/Catppuccin%20$flavour.tmTheme"
+    if curl -fsSL -o "$dir/Catppuccin $flavour.tmTheme" \
+      "https://raw.githubusercontent.com/catppuccin/bat/main/themes/Catppuccin%20$flavour.tmTheme"; then
+      journal_pkg bat "Catppuccin $flavour.tmTheme" new
+      fetched=true
+    else
+      warn "failed: download the Catppuccin $flavour theme for bat"
+      SKIPPED+=("re-run manually: bat_themes (curl the Catppuccin $flavour.tmTheme into $(bat --config-dir)/themes)")
+    fi
   done
   if $fetched; then
     run bat cache --build
@@ -1740,15 +2069,17 @@ stage_install() {
   fi
   if [[ -d /Applications/Ghostty.app ]]; then
     ok "Ghostty already in /Applications"
+    journal_brew ghostty pre-existing cask
   else
-    run brew install --cask ghostty
+    brew_cask ghostty
   fi
   if [[ "$GLYPHS" != on ]]; then
     note "no Nerd Font needed with icons off"
   elif compgen -G "$HOME/Library/Fonts/JetBrainsMonoNerdFont*" >/dev/null; then
     ok "JetBrains Mono Nerd Font already installed"
+    journal_brew font-jetbrains-mono-nerd-font pre-existing cask
   else
-    run brew install --cask font-jetbrains-mono-nerd-font
+    brew_cask font-jetbrains-mono-nerd-font
   fi
   # shellcheck disable=SC2046 # one formula per word
   brew_formulae $(install_formulae)
@@ -1757,7 +2088,11 @@ stage_install() {
 }
 
 stage_ghostty() {
-  say "Font, Catppuccin Mocha theme (always dark), Option-as-Alt, quick terminal,"
+  case "$THEME" in
+    system) say "Font, Catppuccin theme that follows macOS, Option-as-Alt, quick terminal," ;;
+    dark) say "Font, Catppuccin Mocha theme (always dark), Option-as-Alt, quick terminal," ;;
+    leave) say "Font, Option-as-Alt, quick terminal," ;;
+  esac
   say "and Cmd shortcuts that drive herdr."
   write_ghostty_config
   if [[ "$GLYPHS" != on ]]; then
@@ -1767,10 +2102,12 @@ stage_ghostty() {
   else
     warn "Ghostty doesn't list 'JetBrainsMono Nerd Font' yet. It may appear after Ghostty restarts."
   fi
-  if "$GHOSTTY_BIN" +list-themes 2>/dev/null | grep "Catppuccin Mocha" >/dev/null; then
+  if [[ "$THEME" == leave ]]; then
+    note "leaving your Ghostty theme alone"
+  elif "$GHOSTTY_BIN" +list-themes 2>/dev/null | grep -E "Catppuccin (Mocha|Latte)" >/dev/null; then
     ok "Catppuccin themes found"
   else
-    warn "Couldn't confirm the 'Catppuccin Mocha' theme name. Check with: ghostty +list-themes"
+    warn "Couldn't confirm the Catppuccin theme names. Check with: ghostty +list-themes"
   fi
   printf '\n'
   say "Every new Ghostty window (launch, Dock click, Cmd-N, quick terminal) follows one rule:"
@@ -1837,26 +2174,24 @@ free_ctrl_space() {
 }
 
 stage_prompt() {
-  if [[ "$GLYPHS" == on ]]; then
-    say "Pastel powerline prompt:   Apple  ›  folder  ›  git branch  ›  Node/Bun/Deno/Python version  ›  time"
-  else
-    say "Plain-text prompt: folder, git branch and runtime versions, spelled out (icons are off)."
+  if [[ "$PROMPT_STYLE" == leave ]]; then
+    note "leaving your prompt alone"
+    pause
+    return 0
   fi
-  note "Runtime versions only appear inside projects that use them (e.g. a package.json for Node)."
+  if [[ "$PROMPT_STYLE" == tokyo ]]; then
+    say "Tokyo Night powerline prompt: the current folder and the git branch."
+  else
+    say "Pure prompt: the current folder and the git branch, in plain text."
+  fi
   stage_tools prompt
-  local preset
-  if preset=$(starship_config) && [[ -n "$preset" ]]; then
-    install_file "$HOME/.config/starship.toml" <<<"$preset"
-    printf '\n'
-    say "Preview (in this directory):"
-    printf '  '
-    STARSHIP_SHELL=bash starship prompt 2>/dev/null | tail -1 | sed 's/\\\[//g; s/\\\]//g' || true
-    printf '%s\n\n' "$RESET"
-    note "New shells use it. Tweak segments in ~/.config/starship.toml (https://starship.rs/config)."
-  else
-    warn "couldn't generate the starship prompt config; the default prompt still works"
-    SKIPPED+=("starship prompt config: bash $SCRIPT_PATH --only prompt")
-  fi
+  install_file "$HOME/.config/starship.toml" < <(prompt_config)
+  printf '\n'
+  say "Installed preview (in this directory):"
+  printf '  '
+  STARSHIP_SHELL=bash starship prompt 2>/dev/null | tail -2 | sed 's/\\\[//g; s/\\\]//g' || true
+  printf '%s\n\n' "$RESET"
+  note "New shells use it. Tweak it in ~/.config/starship.toml (https://starship.rs/config)."
   pause
 }
 
@@ -1879,7 +2214,7 @@ fi
 HISTFILE=~/.zsh_history HISTSIZE=50000 SAVEHIST=50000
 setopt share_history hist_ignore_all_dups
 EOF
-  if selected prompt; then
+  if selected prompt && [[ "$PROMPT_STYLE" != leave ]]; then
     printf '\n%s\n' "(( \$+commands[starship] )) && eval \"\$(starship init zsh)\""
   fi
   if selected jumper; then
@@ -2163,6 +2498,39 @@ clone_lazyvim_starter() {
   git clone --depth 1 https://github.com/LazyVim/starter "$1" && rm -rf "$1/.git"
 }
 
+# nvim_colorscheme: LazyVim's colours. Dark pins Catppuccin Mocha; system
+# follows macOS through its own mechanism: an autocmd that reads the system
+# appearance whenever Neovim starts or regains focus and flips the background,
+# which picks the light or dark flavour.
+nvim_colorscheme() {
+  if [[ "$THEME" == leave ]]; then
+    return 0
+  elif [[ "$THEME" == system ]]; then
+    cat <<'EOF'
+-- Follows macOS: light theme in light mode, dark in dark mode. An already-open
+-- Neovim may need a restart to repaint after the system switches.
+vim.api.nvim_create_autocmd({ "VimEnter", "FocusGained" }, {
+  group = vim.api.nvim_create_augroup("system_appearance", { clear = true }),
+  callback = function()
+    local style = vim.fn.system("defaults read -g AppleInterfaceStyle 2>/dev/null")
+    vim.o.background = style:match("Dark") and "dark" or "light"
+  end,
+})
+return {
+  { "catppuccin/nvim", name = "catppuccin", opts = { background = { light = "latte", dark = "mocha" } } },
+  { "LazyVim/LazyVim", opts = { colorscheme = "catppuccin" } },
+}
+EOF
+  else
+    cat <<'EOF'
+-- Catppuccin Mocha, fixed dark to match Ghostty, herdr, bat and yazi.
+return {
+  { "LazyVim/LazyVim", opts = { colorscheme = "catppuccin-mocha" } },
+}
+EOF
+  fi
+}
+
 # nvim_icons_plugin: LazyVim's icon provider, set by the glyph switch. Written
 # either way, so switching back to icons later undoes the ASCII fallback.
 nvim_icons_plugin() {
@@ -2270,12 +2638,9 @@ stage_editor() {
     rm -f "$lazy_lua.new"
   fi
 
-  install_file "$nvim_dir/lua/plugins/colorscheme.lua" <<'EOF'
--- Catppuccin Mocha, fixed dark to match Ghostty, herdr, bat and yazi.
-return {
-  { "LazyVim/LazyVim", opts = { colorscheme = "catppuccin-mocha" } },
-}
-EOF
+  if [[ "$THEME" != leave ]]; then
+    install_file "$nvim_dir/lua/plugins/colorscheme.lua" < <(nvim_colorscheme)
+  fi
   install_file "$nvim_dir/lua/plugins/icons.lua" < <(nvim_icons_plugin)
   install_file "$nvim_dir/lua/plugins/diffview.lua" <<'EOF'
 -- Review everything an agent changed: file list on the left, before/after on the right.
@@ -2322,14 +2687,19 @@ EOF
   fi
 }
 
-# yazi_theme: yazi's theme.toml. With the glyph switch off, it empties yazi's
-# icon rules and swaps its powerline separators for plain ones.
+# yazi_theme: yazi's theme.toml. The [flavor] follows the colour mode: the
+# light flavour is the light theme (a dark one there showed a dark theme in
+# light mode), dark pins both to Mocha, and leave writes no [flavor] at all.
+# With the glyph switch off, it also empties yazi's icon rules and swaps its
+# powerline separators for plain ones. Empty when there is nothing to say
+# (leave plus glyphs on).
 yazi_theme() {
-  cat <<'EOF'
-[flavor]
-dark = "catppuccin-mocha"
-light = "catppuccin-mocha"
-EOF
+  case "$THEME" in
+    system)
+      printf '[flavor]\ndark = "catppuccin-mocha"\nlight = "catppuccin-latte"\n' ;;
+    dark)
+      printf '[flavor]\ndark = "catppuccin-mocha"\nlight = "catppuccin-mocha"\n' ;;
+  esac
   [[ "$GLYPHS" == on ]] && return 0
   cat <<'EOF'
 
@@ -2371,20 +2741,29 @@ stage_yazi() {
   say "Three-column file browser with code, image and PDF previews."
   say "Opens with herdr prefix then f, or y in any shell."
   stage_tools yazi
-  local flavors_ok=true flavour
+  local content flavors_ok=true flavour
+  content=$(yazi_theme)
+  if [[ -z "$content" ]]; then
+    note "leaving your yazi theme alone"
+    pause
+    return 0
+  fi
   for flavour in catppuccin-mocha catppuccin-latte; do
     if [[ -d "$HOME/.config/yazi/flavors/$flavour.yazi" ]]; then
       ok "yazi flavour $flavour present"
+      journal_pkg ya "yazi-rs/flavors:$flavour" pre-existing
     else
       cmd "ya pkg add yazi-rs/flavors:$flavour"
-      if ! ya pkg add "yazi-rs/flavors:$flavour"; then
+      if ya pkg add "yazi-rs/flavors:$flavour"; then
+        journal_pkg ya "yazi-rs/flavors:$flavour" new
+      else
         flavors_ok=false
         warn "couldn't install yazi flavour $flavour"
       fi
     fi
   done
   if $flavors_ok; then
-    install_file "$HOME/.config/yazi/theme.toml" < <(yazi_theme)
+    install_file "$HOME/.config/yazi/theme.toml" <<<"$content"
   else
     SKIPPED+=("yazi Catppuccin flavours: ya pkg add yazi-rs/flavors:catppuccin-mocha")
   fi
@@ -2686,13 +3065,22 @@ onboarding = false
 shell_mode = "login"
 new_cwd = "follow"
 
-[theme]
-name = "catppuccin"
-auto_switch = false
-
-[keys]
-# Claude Code keeps Ctrl-B for backgrounding commands.
-prefix = "ctrl+space"
+EOF
+  # Leave-my-themes-alone writes no [theme] section at all; otherwise herdr
+  # follows macOS through its own auto_switch, or stays dark.
+  if [[ "$THEME" != leave ]]; then
+    printf '[theme]\nname = "catppuccin"\n'
+    if [[ "$THEME" == system ]]; then
+      printf 'auto_switch = true\n'
+    else
+      printf 'auto_switch = false\n'
+    fi
+    printf '\n'
+  fi
+  printf '[keys]\n'
+  printf '# Prefix: %s.\n' "$(prefix_name)"
+  printf 'prefix = "%s"\n' "$(prefix_herdr)"
+  cat <<'EOF'
 next_agent = "prefix+a"
 # Not Shift-A: herdr-hunk's setup-keys puts "review staged changes" there.
 previous_agent = "prefix+shift+v"
@@ -2766,8 +3154,12 @@ stage_herdr() {
   note "terminal-notifier delivers herdr's desktop notifications (see the macos stage)."
   printf '\n'
   stage_tools herdr
-  free_ctrl_space
-  printf '\n'
+  # Ctrl-B needs no macOS change, so the free-the-prefix step never runs then:
+  # not run-and-reported, but skipped entirely.
+  if [[ "$PREFIX" == ctrl-space ]]; then
+    free_ctrl_space
+    printf '\n'
+  fi
   install_file "$HERDR_CONFIG" < <(herdr_config)
   journal_undo undo_herdr
   say "Validating:"
@@ -2884,7 +3276,7 @@ stage_macos() {
   if [[ -n "${HERDR_ENV:-}" ]]; then
     printf '\n'
     say "Your current herdr window started before this fix, so it can't find terminal-notifier yet."
-    step "After the wizard: press Ctrl-Space q (detach), then type  herdr  and Enter."
+    step "After the wizard: press $(prefix_name) q (detach), then type  herdr  and Enter."
     note "Everything keeps running while you do that. New Ghostty windows get the fix automatically."
   fi
   printf '\n'
@@ -2978,12 +3370,12 @@ tour_launch() {
     printf 'bash %q --tour' "$SCRIPT_PATH" | pbcopy
     step "Go to your herdr window. No herdr window? Close all Ghostty windows, then click"
     step "Ghostty in the Dock: it opens straight into herdr."
-    step "Press Ctrl-Space c for a new tab, then Cmd-V and Enter (the command is on your clipboard):"
+    step "Press $(prefix_name) c for a new tab, then Cmd-V and Enter (the command is on your clipboard):"
     note "bash $SCRIPT_PATH --tour"
     exit 0
   fi
   say "You're inside herdr. The wizard lives in this tab and keeps running whatever you close."
-  step "Name this tab: prefix Shift-T (Ctrl-Space, then Shift-T), type 'tour', Enter."
+  step "Name this tab: prefix Shift-T ($(prefix_name), then Shift-T), type 'tour', Enter."
   note "Coming back here at any point: prefix g (Cmd-P), pick the 'tour' tab."
   printf '\n'
   say "One workspace per repo:"
@@ -3184,7 +3576,8 @@ cheatsheet() {
   done
   if selected review || selected files || selected github; then keep+="popups "; fi
   if hunk_ready; then keep+="hunk "; fi
-  cheatsheet_text | awk -v keep="$keep" '
+  # The prefix line names the chosen key: Ctrl-Space above is the default's name.
+  cheatsheet_text | sed "s/Ctrl-Space/$(prefix_name)/" | awk -v keep="$keep" '
     match($0, /^[{][a-z]+[}]/) {
       line = substr($0, RLENGTH + 1)
       sub(/^ /, "", line)
@@ -3350,7 +3743,7 @@ stage_targets() {
         printf 'edit %s\n' "$HOME/.codex/config.toml" "$HOME/.codex/hooks.json"
       ;;
     prompt)
-      printf 'file %s\n' "$HOME/.config/starship.toml" ;;
+      [[ "$PROMPT_STYLE" != leave ]] && printf 'file %s\n' "$HOME/.config/starship.toml" ;;
     shell)
       printf 'edit %s\n' "$HOME/.zprofile" "$HOME/.zshrc"
       selected jumper && printf 'file %s\n' "$HOME/.local/bin/hproj"
@@ -3362,8 +3755,8 @@ stage_targets() {
         # Rewritten whole, and only to add the language extras.
         grep -q 'extras.lang.typescript' "$nvim/lua/config/lazy.lua" ||
           printf 'file %s\n' "$nvim/lua/config/lazy.lua"
-        printf 'file %s\n' "$nvim/lua/plugins/colorscheme.lua" "$nvim/lua/plugins/icons.lua" \
-          "$nvim/lua/plugins/diffview.lua"
+        [[ "$THEME" != leave ]] && printf 'file %s\n' "$nvim/lua/plugins/colorscheme.lua"
+        printf 'file %s\n' "$nvim/lua/plugins/icons.lua" "$nvim/lua/plugins/diffview.lua"
         printf 'edit %s\n' "$nvim/lua/config/autocmds.lua"
       else
         # Not LazyVim yet: the whole folder goes aside for the starter.
@@ -3379,7 +3772,7 @@ stage_targets() {
       fi
       ;;
     yazi)
-      printf 'file %s\n' "$HOME/.config/yazi/theme.toml" ;;
+      [[ -n "$(yazi_theme)" ]] && printf 'file %s\n' "$HOME/.config/yazi/theme.toml" ;;
     statusline)
       command -v claude >/dev/null 2>&1 || return 0
       printf 'file %s\n' "$STATUSLINE"
@@ -3511,7 +3904,7 @@ show_plan() {
   # In the order the stages meet them.
   stage_runs install && ! xcode-select -p >/dev/null 2>&1 && needs+=("install the Xcode command line tools")
   stage_runs ghostty && ! in_ghostty && needs+=("relaunch into Ghostty")
-  stage_runs herdr && ctrl_space_taken && needs+=("free ctrl+space")
+  stage_runs herdr && [[ "$PREFIX" == ctrl-space ]] && ctrl_space_taken && needs+=("free ctrl+space")
   stage_runs macos && needs+=("allow notifications" "allow accessibility")
   stage_runs editor && ! grep -q 'LazyVim/LazyVim' "$HOME/.config/nvim/lua/config/lazy.lua" 2>/dev/null &&
     needs+=("open Neovim once, while it sets itself up")
@@ -3568,7 +3961,7 @@ TOTAL_STAGES=$(selected_stage_count)
 usage() {
   cat <<EOF
 usage: bash $(basename "$0") [--yes] [--from NAME | --only NAME,NAME | --skip NAME,NAME | --tour]
-       bash $(basename "$0") --list | --revert [--restore]
+       bash $(basename "$0") --list | --revert [--restore] | --uninstall
 
   (no flags)       run every stage; finished stages report "already done" and move on
   --yes            for a re-run: reuse the saved answers, go without asking, and don't
@@ -3584,6 +3977,9 @@ usage: bash $(basename "$0") [--yes] [--from NAME | --only NAME,NAME | --skip NA
                    moved to ~/.ghostty-herdr-wizard/reverted/
   --revert --restore
                    move what the last --revert took away back into place
+  --uninstall      run the full --revert first, then offer to remove each
+                   package the wizard installed, one at a time. Tools you
+                   already had are never offered. Node is never touched
 EOF
 }
 
@@ -3613,8 +4009,9 @@ stage_list() {
   printf ',%s,' "$1"
 }
 
-# What this run does. MODE is run, list, revert, restore or help; for a run,
-# FROM, ONLY and SKIP pick the stages (see stage_wanted). YES is 1 for --yes.
+# What this run does. MODE is run, list, revert, restore, uninstall or help;
+# for a run, FROM, ONLY and SKIP pick the stages (see stage_wanted). YES is 1
+# for --yes.
 MODE=run
 FROM=""
 ONLY=""
@@ -3651,6 +4048,7 @@ _parse_args() {
     --only) ONLY=$(stage_list "${2:-}") || return 2 ;;
     --skip) SKIP=$(stage_list "${2:-}") || return 2 ;;
     --list) MODE=list ;;
+    --uninstall) MODE=uninstall ;;
     --revert)
       case "${2:-}" in
         "") MODE=revert ;;
@@ -3694,6 +4092,16 @@ case "$MODE" in
   revert | restore)
     printf '\n%s%s  Revert%s\n\n' "$BOLD" "$BLUE" "$RESET"
     if [[ "$MODE" == revert ]]; then revert_all; else revert_restore; fi
+    if (( ${#SKIPPED[@]} )); then
+      printf '\n'; warn "still to do by hand:"
+      for s in "${SKIPPED[@]}"; do note "  - $s"; done
+    fi
+    printf '\n'
+    exit 0
+    ;;
+  uninstall)
+    printf '\n%s%s  Uninstall%s\n\n' "$BOLD" "$BLUE" "$RESET"
+    uninstall_packages
     if (( ${#SKIPPED[@]} )); then
       printf '\n'; warn "still to do by hand:"
       for s in "${SKIPPED[@]}"; do note "  - $s"; done

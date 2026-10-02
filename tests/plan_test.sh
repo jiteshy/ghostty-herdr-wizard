@@ -105,7 +105,7 @@ test_yes_goes_with_any_run() {
   check "[[ '$(parsed --only herdr,macos --yes)' == '1 run  ,herdr,macos,' ]]" "--yes after --only"
   check "[[ '$(parsed --from editor)' == '0 run editor ' ]]" "no --yes, no YES"
   local bad
-  for bad in '--revert --yes' '--yes --list' '--yes --revert --restore' '--yes --yes' '--yes nope'; do
+  for bad in '--revert --yes' '--yes --list' '--yes --revert --restore' '--yes --yes' '--yes nope' '--yes --uninstall'; do
     check "[[ '$(parsed $bad)' == usage-error ]]" "rejects $bad"
   done
   cleanup

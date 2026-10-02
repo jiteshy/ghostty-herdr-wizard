@@ -23,7 +23,7 @@ After it runs, you can:
 - **Tabs (top).** This repo has four tabs: `agents`, `code`, `dev server` and `git review`. Each repo keeps its own tabs.
 - **Claude Code (large pane).** The two lines at the bottom show the model, the effort, the folder, the context used, the cost of the session, and your 5-hour and weekly limits.
 - **Codex (top right).** A second agent works in the same repo.
-- **Shell (bottom right).** The prompt shows the folder, the git branch and the time.
+- **Shell (bottom right).** The prompt shows the folder and the git branch.
 
 If you close Ghostty, the agents continue. When you open Ghostty again, your layout comes back. It also comes back after you restart the Mac.
 
@@ -49,6 +49,7 @@ bash ghostty-herdr-wizard.sh --only statusline     # do only this step
 bash ghostty-herdr-wizard.sh --tour                # do the tour again
 bash ghostty-herdr-wizard.sh --yes                 # re-run with last time's answers, no pauses
 bash ghostty-herdr-wizard.sh --revert              # undo every config change
+bash ghostty-herdr-wizard.sh --uninstall           # revert, then offer to remove each tool it installed
 ```
 
 With `--yes`, the steps that only you can do still wait for you: relaunching into Ghostty, allowing notifications and accessibility, and freeing Ctrl-Space. The script also still asks before it replaces a file you have changed.
@@ -63,21 +64,27 @@ The script does three types of work:
 2. It writes config files. If a file exists and is different, the script shows you the changes and asks you first. It keeps a copy of the old file in `~/.ghostty-herdr-wizard/backups/`.
 3. It tells you what to do for the steps that need a person. Examples: approve a macOS permission, or sign in to GitHub.
 
-**`choices`.** All the questions come first. First, what to install: Ghostty, herdr and terminal-notifier always, then one checkbox per group of tools that need each other (Nerd Font + icons, starship prompt, project jumper + fuzzy find, shell typing help, editor, lazygit for review, file manager, GitHub, Claude Code status line). All are ticked to start with. A group you untick is not installed and its step is skipped. Unticking icons gives plain text, which works in any font, so nothing shows as boxes in a terminal without a Nerd Font. Then the folder with your repos (only with the project jumper), and the tabs that new workspaces open with. The answers are saved, and the next run offers to use them again. Then the script shows its plan: how many tools it installs, which of your files it replaces, and the points where it needs you. Nothing happens until you say yes.
+**`choices`.** All the questions come first. First, what to install: Ghostty, herdr and terminal-notifier always, then one checkbox per group of tools that need each other (Nerd Font + icons, starship prompt, project jumper + fuzzy find, shell typing help, editor, lazygit for review, file manager, GitHub, Claude Code status line). All are ticked to start with. A group you untick is not installed and its step is skipped. Unticking icons gives plain text, which works in any font, so nothing shows as boxes in a terminal without a Nerd Font. Then the prompt style (plain pure or powerline Tokyo Night, both showing only folder and git branch, or leave your prompt alone), then herdr's prefix key (Ctrl-Space by default, Ctrl-B needs no macOS changes but clashes with Claude Code), and the colour mode for Ghostty, herdr, Neovim and yazi (follow the system, always dark, or leave your themes alone). Then the folder with your repos (only with the project jumper), and the tabs that new workspaces open with. The answers are saved, and the next run offers to use them again. Then the script shows its plan: how many tools it installs, which of your files it replaces, and the points where it needs you. Nothing happens until you say yes.
 
-Each step checks your files right before it runs. If it is about to replace a file you already have, it says so and names the file. A copy goes to `~/.ghostty-herdr-wizard/backups/`, and `--revert` puts it back.
+Each step checks your files right before it runs. If it is about to replace a file you already have, it says so and names the file. A copy goes to `~/.ghostty-herdr-wizard/backups/`, and `--revert` puts it back. `--revert` leaves the tools installed; `--uninstall` runs the revert first, then asks about each tool the wizard installed, one at a time. Tools you already had are never offered, and Node is never touched.
 
 **`install`.** Install everything with Homebrew in one go: Ghostty, herdr and the tools you picked. Tools of steps you skip with `--skip` are not installed.
 
-**`ghostty`, `herdr`, `macos`: the terminal and the agents.** Write the Ghostty config: the Catppuccin Mocha dark theme, Cmd keys that control herdr, and herdr in every new window. Make the Ctrl-Space key free for herdr, write its config, and connect Claude Code and Codex to it, so their conversations continue after a restart. Set up notifications and the quick terminal.
+**`ghostty`, `herdr`, `macos`: the terminal and the agents.** Write the Ghostty config: the Catppuccin theme in your colour mode, Cmd keys that control herdr, and herdr in every new window. Make the prefix key free for herdr (skipped with Ctrl-B), write its config, and connect Claude Code and Codex to it, so their conversations continue after a restart. Set up notifications and the quick terminal.
 
-**`prompt`, `shell`: the shell.** Set up the Starship prompt. Add history search, aliases for `bat`, `eza`, `fzf` and the other command-line tools, and a command that finds and opens your repos.
+**`prompt`, `shell`: the shell.** Set up the Starship prompt in your chosen style. Add history search, aliases for `bat`, `eza`, `fzf` and the other command-line tools, and a command that finds and opens your repos.
 
 **`editor`, `review`, `yazi`, `github`: code and git.** Neovim with LazyVim, `lazygit` to stage and commit, `yazi` to browse files, and the GitHub CLI with `gh-dash` for pull requests.
 
 **`statusline`.** Add the Claude Code status line.
 
 **`tour`.** Nine short screens. You open repos, start agents, split panes, let Claude change a file, review the change, and close and resume everything. The tour teaches you the keys while you use them. Type `keys` later to see the full list.
+
+## Tests
+
+Unit-style checks live in `tests/`, one file per area: `journal_test.sh` (journal, backups, `--revert`), `selection_test.sh` (the choices screen), `stages_test.sh` (named stages), `plan_test.sh` (REPLACES badges and the plan), `glyphs_test.sh` (the icons switch), `tabs_test.sh` (default tabs), `review_test.sh` (herdr-hunk), `prefix_theme_test.sh` (prefix and colour), `prompt_test.sh` (prompt styles), `uninstall_test.sh` (`--uninstall`), and `revert_acceptance_test.sh`. Run one with e.g. `bash tests/journal_test.sh`.
+
+`bash tests/revert_acceptance_test.sh` is the revert acceptance test: it snapshots a throwaway home, runs the whole wizard with everything selected (only the `macos` and `tour` steps are skipped — those need a human), runs `--revert`, and diffs the home against the snapshot, for both a pristine and a seeded home. Run it before any change to the revert path.
 
 ## Thanks
 

@@ -13,15 +13,17 @@ SUGGESTED="agents,source code,local server,git review"
 answer() { printf '%s\n' "$@" > "$T/answers"; }
 
 # fake_herdr [hunk]: a herdr on PATH for the tab hook. Every call is logged to
-# $T/herdr.log; the one workspace is new, on its single starting tab. With
-# "hunk", the herdr-hunk plugin shows up in `plugin list`.
+# $T/herdr.log; the one workspace is new, on its single starting tab (or on
+# $T/tabcount tabs when that file exists). With "hunk", the herdr-hunk plugin
+# shows up in `plugin list`.
 fake_herdr() {
   mkdir -p "$T/bin"
   cat > "$T/bin/herdr" <<EOF
 #!/bin/bash
 printf '%s\n' "\$*" >> "$T/herdr.log"
+count=\$(cat "$T/tabcount" 2>/dev/null || echo 1)
 case "\$1 \$2" in
-  "workspace list") echo '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","tab_count":1}]}}' ;;
+  "workspace list") echo "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"active_tab_id\":\"w1:t1\",\"tab_count\":\$count}]}}" ;;
   "pane list") echo '{"result":{"panes":[{"cwd":"/tmp/repo"}]}}' ;;
   "tab create") n=\$(grep -c '^tab create' "$T/herdr.log"); echo "{\"result\":{\"tab\":{\"tab_id\":\"w1:t\$((n + 1))\"}}}" ;;
   "plugin list") echo "1 plugin installed:"; [ "${1:-}" = hunk ] && echo "- jhochenbaum.hunkdiff (hunk) enabled" ;;
@@ -124,6 +126,19 @@ test_hook_launches_the_hunk_review_in_tab_4() {
   local after_tabs; after_tabs=$(grep -v '^tab create\|^tab rename\|^workspace list\|^pane list\|^plugin list' "$T/herdr.log" | tr '\n' '|')
   check "[[ '$after_tabs' == 'tab focus w1:t4|plugin action invoke review --plugin jhochenbaum.hunkdiff|tab focus w1:t1|' ]]" \
     "focus tab 4, open the review there, back to tab 1 (got '$after_tabs')"
+  cleanup
+}
+
+test_hook_ignores_a_duplicate_event() {
+  new_home
+  fake_herdr
+  run_hook "$SUGGESTED"
+  check "[[ '$(grep -c '^tab create' "$T/herdr.log")' == 3 ]]" "the first event lays out the tabs"
+  printf '4' > "$T/tabcount"
+  : > "$T/herdr.log"
+  run_hook "$SUGGESTED"
+  check "! grep -qE '^tab (create|rename|focus)' '$T/herdr.log'" \
+    "a duplicate event lays out nothing (got '$(cat "$T/herdr.log")')"
   cleanup
 }
 

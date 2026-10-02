@@ -119,19 +119,31 @@ test_neovim_icons_fall_back_to_ascii_without_glyphs() {
 test_starship_prompt_has_no_nerd_glyphs_without_glyphs() {
   if ! command -v starship >/dev/null 2>&1; then printf '  skipped: needs starship\n'; return 0; fi
   new_home
-  # Rendered inside this repo, so the git branch segment shows too: starship's
-  # own default branch symbol is a Nerd Font glyph.
-  wizard 'GLYPHS=off; starship_config'
+  # Rendered inside this repo, so the git branch segment shows too.
+  wizard 'GLYPHS=off; PROMPT_STYLE=pure; prompt_config'
   STARSHIP_CONFIG="$T/out" STARSHIP_SHELL=bash starship prompt --path "$ROOT" > "$T/prompt" 2>/dev/null
-  check "grep -q 'git' '$T/prompt'" "glyphs off: prompt still shows the git branch"
+  branch=$(git -C "$ROOT" branch --show-current 2>/dev/null || true)
+  check "[[ -n '$branch' ]] && grep -qF '$branch' '$T/prompt'" "glyphs off: prompt still shows the git branch"
   check "! has_nerd_glyph '$T/prompt'" "glyphs off: no Nerd Font glyphs in the prompt"
-  wizard 'GLYPHS=on; starship_config'
+  wizard 'GLYPHS=on; PROMPT_STYLE=tokyo; prompt_config'
   STARSHIP_CONFIG="$T/out" STARSHIP_SHELL=bash starship prompt --path "$ROOT" > "$T/prompt" 2>/dev/null
-  check "has_nerd_glyph '$T/prompt'" "glyphs on: pastel powerline prompt keeps its glyphs"
+  check "has_nerd_glyph '$T/prompt'" "glyphs on: tokyo night prompt keeps its powerline separators"
   cleanup
 }
 
 # End to end: a saved "off" is honoured by a later --only run with no questions.
+test_an_already_installed_font_is_detected() {
+  new_home
+  fake_brew
+  mkdir -p "$H/Library/Fonts"
+  touch "$H/Library/Fonts/JetBrainsMonoNerdFont-Regular.ttf"
+  wizard 'JOURNALING=1; GLYPHS=on; stage_install'
+  check "! grep -q 'font-jetbrains-mono-nerd-font' '$T/brew.log'" "no install when the font is there"
+  check "grep -q 'BREW\tfont-jetbrains-mono-nerd-font\tpre-existing\tcask' '$STATE/journal.tsv'" \
+    "the found font journals pre-existing, so uninstall never offers it"
+  cleanup
+}
+
 test_ghostty_stage_follows_the_saved_choice() {
   new_home
   mkdir -p "$STATE"
@@ -151,18 +163,18 @@ test_choosing_plain_text_saves_it_and_skips_the_font() {
   ( # subshell: the fake brew and bat on PATH never outlive this test
     fake_brew
     fake_bat
-    # banner, untick icons, accept, projects folder (Enter), don't create it, no tabs, done
-    printf '\n1\n\n\nn\n3\n\n' > "$T/answers"
+    # banner, untick icons, accept, prefix/theme/prompt defaults, projects folder (Enter), don't create it, no tabs, done
+    printf '\n1\n\n\n\n\n\nn\n3\n\n' > "$T/answers"
     CLI_INPUT="$T/answers" cli --only choices
     check "grep -qx 'GLYPHS=off' '$STATE/choices.env'" "unticking icons saves plain text"
     cli --only install
     check "grep -q 'formula' '$T/brew.log'" "the install stage ran brew"
     check "! grep -q 'font-jetbrains-mono-nerd-font' '$T/brew.log'" "plain text: no Nerd Font install"
-    # banner, don't reuse, Enter accepts the screen (keeps plain text), Enter, don't create, Enter keeps no tabs, done
-    printf '\nn\n\n\nn\n\n\n' > "$T/answers"
+    # banner, don't reuse, Enter accepts the screen (keeps plain text), prefix/theme/prompt defaults, Enter, don't create, Enter keeps no tabs, done
+    printf '\nn\n\n\n\n\n\nn\n\n\n' > "$T/answers"
     CLI_INPUT="$T/answers" cli --only choices
     check "grep -qx 'GLYPHS=off' '$STATE/choices.env'" "Enter on a re-run keeps the saved answer"
-    printf '\nn\n1\n\n\nn\n\n\n' > "$T/answers"
+    printf '\nn\n1\n\n\n\n\n\nn\n\n\n' > "$T/answers"
     CLI_INPUT="$T/answers" cli --only choices
     check "grep -qx 'GLYPHS=on' '$STATE/choices.env'" "ticking icons again saves icons"
     cli --only install
