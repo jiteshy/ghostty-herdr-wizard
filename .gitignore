@@ -1,2 +1,5 @@
 .DS_Store
 *.swp
+# Test-run byproducts: a botched URL-as-path clone target and nvim warnings.
+https:/
+nvim.log
