@@ -39,6 +39,8 @@ test_prompt_configs_show_only_directory_and_branch() {
     check "! grep -qE 'username|hostname|nodejs|python|deno|bun|time' '$T/out'" \
       "$style: no runtime, user, host or time modules"
   done
+  wizard "PROMPT_STYLE=pure; prompt_config"
+  check "grep -qxF 'format = \"[\$path](\$style) \"' '$T/out'" "pure: a space between the folder and what follows it"
   check "! grep -q 'starship preset' '$WIZARD'" \
     "the wizard no longer depends on upstream preset internals"
   cleanup

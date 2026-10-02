@@ -21,7 +21,7 @@ After it runs, you can:
 - **Spaces (top left).** Each repo is one workspace. Select a repo to go to it. The `spine` repo also shows a git worktree. A second agent works there on a different branch.
 - **Agents (bottom left).** This list shows all agents in all repos. A mark on each row tells you if the agent works, waits for you, or is idle.
 - **Tabs (top).** This repo has four tabs: `agents`, `code`, `dev server` and `git review`. Each repo keeps its own tabs.
-- **Claude Code (large pane).** The two lines at the bottom show the model, the effort, the folder, the context used, the cost of the session, and your 5-hour and weekly limits.
+- **Claude Code (large pane).** The two lines at the bottom show the model, the effort, the folder, the context used, and your 5-hour and weekly limits.
 - **Codex (top right).** A second agent works in the same repo.
 - **Shell (bottom right).** The prompt shows the folder and the git branch.
 

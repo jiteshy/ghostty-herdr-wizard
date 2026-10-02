@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fixed: the herdr-hunk review opened over the first tab instead of in `git review`. The review action returns before hunk opens its pane, so the tab hook now stays on the review tab until the pane is there (5 seconds at most) before going back to tab 1. Same for a review tab after your own tabs
+- Fixed: the pure prompt had no space after the folder (`my-appon main`)
+- The Claude Code status line no longer shows the session cost in dollars. The context and rate limit percentages stay
 - README: the `choices` questions are listed in the order they are asked, the review group names herdr-hunk, and a new "Undoing it" section says what `--revert` and `--uninstall` cannot undo (the System Settings checklist, installed tools, what the tools save for themselves, and backups from 1.0.0). The cheat sheet's prefix `e` line says "your editor" instead of nvim, since the editor group may be unticked, and `--revert` in the usage text now mentions the System Settings checklist
 - The `tour` stage is built from your choices. Five screens always run: landing in herdr, moving around, agents, tabs, and a closing screen on picking up later and daily habits (the old resume screen folded in). One more for each tool that is selected and installed: Neovim, review, yazi, gh-dash and the status line. yazi and gh-dash get screens of their own for the first time. The counter counts only the screens that run, `s` at any pause skips the rest, and no screen names a tool you declined: without the project jumper, workspaces open with herdr's own prefix `Shift-N`, and the tabs screen lists your own default tabs and herdr-hunk's review tab, with numbered steps only for the suggested layout (or how to make tabs by hand). The status line screen no longer tells you to change your effort level or model to see the segments move. `--tour` and `--only tour` both replay it
 - Tests: `bash tests/tour_test.sh`

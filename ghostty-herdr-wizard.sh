@@ -1423,7 +1423,7 @@ format = "$directory$git_branch$character"
 
 [directory]
 style = "bold blue"
-format = "[$path]($style)"
+format = "[$path]($style) "
 truncation_length = 3
 truncate_to_repo = true
 
@@ -1486,18 +1486,17 @@ statusline_script() {
 # Docs: https://code.claude.com/docs/en/statusline
 #
 # Line 1: model · effort │ directory │ worktree (only inside a linked git worktree)
-# Line 2: context used │ session cost │ 5-hour limit │ weekly limit (limits: Pro/Max only)
+# Line 2: context used │ 5-hour limit │ weekly limit (limits: Pro/Max only)
 
 input=$(cat)
 
 # One jq call. Fields are joined with the ASCII unit separator, not tabs:
 # `read` merges consecutive tabs, which would shift fields left when one is empty.
-IFS=$'\x1f' read -r model dir worktree cost ctx_pct ctx_tokens ctx_size effort \
+IFS=$'\x1f' read -r model dir worktree ctx_pct ctx_tokens ctx_size effort \
   five_pct five_reset week_pct <<<"$(jq -r '[
     .model.display_name // "Claude",
     .workspace.current_dir // .cwd // "",
     .workspace.git_worktree // "",
-    .cost.total_cost_usd // 0,
     .context_window.used_percentage // "",
     .context_window.total_input_tokens // 0,
     .context_window.context_window_size // 0,
@@ -1566,7 +1565,6 @@ if [[ -n "$ctx_pct" ]]; then
 else
   line2="${DIM}context –${RESET}"
 fi
-line2+="${SEP}${GREEN}$(printf '$%.2f' "$cost")${RESET} ${DIM}session${RESET}"
 if [[ -n "$five_pct" ]]; then
   reset_note=""
   if [[ -n "$five_reset" ]]; then reset_note=" ${DIM}resets $(date -r "$five_reset" +%H:%M)${RESET}"; fi
@@ -1730,7 +1728,7 @@ cluster_tools() {
       "resvg|lets yazi preview SVG images" ;;
     github) printf '%s\n' "gh|the GitHub CLI: sign in, clone, open PRs" \
       "gh-dash|your PRs, review requests and issues in one screen" ;;
-    statusline) printf '%s\n' "status line|context used, cost and rate limits under Claude Code's prompt" ;;
+    statusline) printf '%s\n' "status line|context used and rate limits under Claude Code's prompt" ;;
   esac
 }
 
@@ -3066,6 +3064,24 @@ if [[ -n "$review_label" && "$plugins" == *jhochenbaum.hunkdiff* ]]; then
   if [[ -n "$review_tab_id" ]]; then
     "$herdr_bin" tab focus "$review_tab_id" >/dev/null 2>&1
     "$herdr_bin" plugin action invoke review --plugin jhochenbaum.hunkdiff >/dev/null 2>&1
+    # The action returns before hunk opens its pane, and the pane opens over
+    # whatever is focused by then. So stay on the review tab until its second
+    # pane is there (5s at most), or the review lands on the first tab.
+    for _ in $(seq 1 25); do
+      review_panes=$("$herdr_bin" tab list --workspace "$workspace_id" 2>/dev/null |
+        REVIEW_TAB="$review_tab_id" python3 -c '
+import json, os, sys
+try:
+    tabs = json.load(sys.stdin)["result"]["tabs"]
+except (ValueError, KeyError, TypeError):
+    sys.exit(0)
+for tab in tabs:
+    if tab.get("tab_id") == os.environ["REVIEW_TAB"]:
+        print(tab.get("pane_count") or 0)
+') || review_panes=""
+      [[ "${review_panes:-0}" -ge 2 ]] && break
+      sleep 0.2
+    done
   fi
 fi
 
@@ -3363,7 +3379,6 @@ stage_statusline() {
   rm -f "$preview"
   printf '\n'
   note "context   % of the context window used, then tokens in context / window size"
-  note "\$…       estimated cost of this session so far (resets on /clear)"
   note "5h / week % of your plan's rate limits (Pro/Max only), with the 5-hour reset time"
   note "Percentages go yellow at 50% and red at 80%. A worktree segment appears inside git worktrees."
   note "Claude Code doesn't report a running token total, so tokens shown are what's in context now."
@@ -3701,15 +3716,15 @@ tour_statusline() {
   say "Look under the prompt in any Claude pane (it fills in after the first reply):"
   printf '\n'
   note "  line 1   model · effort level │ directory │ worktree (only inside a worktree)"
-  note "  line 2   context % (tokens in context / window) │ session cost │ 5h limit + reset time │ week limit"
+  note "  line 2   context % (tokens in context / window) │ 5h limit + reset time │ week limit"
   note "  colours  percentages go yellow at 50% and red at 80%"
   printf '\n'
   step "Find the effort level on line 1: it is the reasoning effort this session runs at."
-  step "Ask Claude something with a long answer: the context % and session cost go up."
+  step "Ask Claude something with a long answer: the context % goes up."
   step "Open Claude in the worktree workspace from the agents screen: the worktree segment appears."
   printf '\n'
   note "Context going yellow? /compact summarises the conversation and frees space."
-  note "Starting something unrelated? /clear starts fresh (session cost goes back to \$0)."
+  note "Starting something unrelated? /clear starts fresh (context goes back to 0%)."
 }
 
 tour_habits() {

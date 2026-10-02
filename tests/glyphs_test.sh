@@ -62,6 +62,7 @@ test_statusline_is_plain_text_without_glyphs() {
   bash "$H/sl.sh" <<<"$sample" > "$T/rendered"
   check "grep -q 'Opus' '$T/rendered' && grep -q 'worktree feature' '$T/rendered'" "glyphs off: still shows model and worktree"
   check "! has_nerd_glyph '$T/rendered'" "glyphs off: no Nerd Font icons in the status line"
+  check "! grep -qF '\$' '$T/rendered' && ! grep -q 'session' '$T/rendered'" "no session cost in the status line"
   wizard 'GLYPHS=on; statusline_script > "$HOME/sl.sh"'
   bash "$H/sl.sh" <<<"$sample" > "$T/rendered"
   check "has_nerd_glyph '$T/rendered'" "glyphs on: status line shows its icons"

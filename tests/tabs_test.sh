@@ -17,7 +17,8 @@ answer() { printf '%s\n' "$@" > "$T/answers"; }
 # fake_herdr [hunk]: a herdr on PATH for the tab hook. Every call is logged to
 # $T/herdr.log; the one workspace is new, on its single starting tab (or on
 # $T/tabcount tabs when that file exists). With "hunk", the herdr-hunk plugin
-# shows up in `plugin list`.
+# shows up in `plugin list`. `tab list` shows the review pane in every tab only
+# from its second call on, the way hunk opens it a moment after the action.
 fake_herdr() {
   mkdir -p "$T/bin"
   cat > "$T/bin/herdr" <<EOF
@@ -28,6 +29,8 @@ case "\$1 \$2" in
   "workspace list") echo "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"active_tab_id\":\"w1:t1\",\"tab_count\":\$count}]}}" ;;
   "pane list") echo '{"result":{"panes":[{"cwd":"/tmp/repo"}]}}' ;;
   "tab create") n=\$(grep -c '^tab create' "$T/herdr.log"); echo "{\"result\":{\"tab\":{\"tab_id\":\"w1:t\$((n + 1))\"}}}" ;;
+  "tab list") n=\$(grep -c '^tab list' "$T/herdr.log"); p=1; [ "\$n" -ge 2 ] && p=2
+    echo "{\"result\":{\"tabs\":[{\"tab_id\":\"w1:t2\",\"pane_count\":\$p},{\"tab_id\":\"w1:t4\",\"pane_count\":\$p},{\"tab_id\":\"w1:t5\",\"pane_count\":\$p}]}}" ;;
   "plugin list") echo "1 plugin installed:"; [ "${1:-}" = hunk ] && echo "- jhochenbaum.hunkdiff (hunk) enabled" ;;
 esac
 exit 0
@@ -152,7 +155,7 @@ test_tab_names_are_never_glob_expanded() {
 
 # review_calls: the hook's calls after it made the tabs: focus, review, focus.
 review_calls() {
-  grep -v '^tab create\|^tab rename\|^workspace list\|^pane list\|^plugin list' "$T/herdr.log" | tr '\n' '|'
+  grep -v '^tab create\|^tab rename\|^workspace list\|^pane list\|^plugin list\|^tab list' "$T/herdr.log" | tr '\n' '|'
 }
 
 test_hook_opens_just_the_users_tabs_without_hunk() {
@@ -175,6 +178,8 @@ test_hook_adds_the_hunk_review_as_the_last_tab() {
     "the last tab created is git review"
   check "[[ '$(review_calls)' == 'tab focus w1:t4|plugin action invoke review --plugin jhochenbaum.hunkdiff|tab focus w1:t1|' ]]" \
     "default three: the review opens in tab 4, then back to tab 1 (got '$(review_calls)')"
+  check "[[ '$(sed -n '/^plugin action invoke/,$p' "$T/herdr.log" | grep -c '^tab list')' == 2 ]]" \
+    "stays on the review tab until hunk's pane is there, so the review can't land on tab 1"
   : > "$T/herdr.log"
   run_hook "a,b,c,d" review
   check "[[ '$(review_calls)' == 'tab focus w1:t5|plugin action invoke review --plugin jhochenbaum.hunkdiff|tab focus w1:t1|' ]]" \
