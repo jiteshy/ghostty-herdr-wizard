@@ -10,7 +10,6 @@
 - Tests: `bash tests/prompt_test.sh`
 - New `--uninstall` flag: runs the full `--revert` first (removing binaries while configs reference them would break every new shell), then offers each wizard-installed package one at a time. Installs now journal formulae and casks as new or pre-existing, plus yazi flavours and downloaded bat themes; pre-existing tools are never offered, herdr plugins go through `herdr plugin uninstall`, flavours through `ya pkg delete`, themes through bat's cache rebuild, and Node is never touched
 - Tests: `bash tests/uninstall_test.sh`
-
 - Each stage checks the filesystem right before it runs and says what it will do to your files: `⚠ REPLACES 2 files you already have` with each path, where the copy goes and that `--revert` undoes it, then the files it only adds its own lines to (`~/.zshrc`, `~/.zprofile`, Neovim's `autocmds.lua`, `~/.claude/settings.json`), and how many files are new. A file the wizard wrote on an earlier run and you have not touched since is not called yours. A non-LazyVim `~/.config/nvim` is named as a folder replaced whole
 - After the `choices` stage, one plan for the whole run: how many tools it installs, which of your files it replaces, the points where it needs you (the Xcode tools dialog, relaunch into Ghostty, free Ctrl-Space, allow notifications, allow accessibility, the first Neovim launch, the GitHub login, each only when it applies to this run) and the `--revert` promise. Then one `Go? [y/N]`. No writes no files (your answers are still saved). A run without the `choices` stage, such as `--only editor`, shows the per-stage badges but no plan
 - New `--yes` flag for re-runs, alone or with `--from`, `--only` or `--skip`: it reuses the saved answers, shows the plan without asking for Go, installs the herdr hooks for Claude Code and Codex without asking, makes the pauses between stages no-ops and skips the tour (unless `--only tour`). What only you can do still waits: the Xcode tools dialog, relaunching into Ghostty, Ctrl-Space, notifications, accessibility, the GitHub login, the first Neovim launch and the Nerd Font check. Replacing a file that differs (or a non-LazyVim `~/.config/nvim`) still shows what it is and asks
@@ -48,7 +47,6 @@
 - When herdr-hunk is installed, tab 4 opens straight into its review (`herdr plugin action invoke review`), then focus returns to tab 1. Without it, tab 4 is a plain shell with the same label. The review tab is set by `review_tab=4` in `apply-tab-layout.sh`. The review fills tab 4 only when hunk's `review.placement` is `overlay`; the wizard sets that once it installs herdr-hunk itself
 - Tests: `bash tests/tabs_test.sh`
 - New keybindings: prefix `Shift-O` opens an existing worktree, prefix `Shift-K` deletes a worktree checkout
-- Themes are now always dark (Catppuccin Mocha) across Ghostty, herdr, bat, nvim and yazi, instead of following macOS light/dark
 
 ## 1.0.0 (2026-09-14)
 
