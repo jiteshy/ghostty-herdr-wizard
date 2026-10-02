@@ -3332,41 +3332,107 @@ stage_statusline() {
 
 # ── Tour ──────────────────────────────────────────────────────────────────
 
-# The tour's sections, in order. Each is one screen.
+# The tour's sections, in order, each one screen: "name:group:title", run by
+# tour_<name>. A section with a group runs only while that group is selected
+# and its tool installed (see tour_ready): touring a declined tool is worse
+# than no tour. The rest teach the setup itself and always run.
 TOUR=(
-  "tour_launch:Land in herdr, one workspace per repo"
-  "tour_navigation:Moving around"
-  "tour_agents:Run and juggle agents"
-  "tour_tabs:Tabs inside one repo"
-  "tour_nvim:Neovim next to your agent"
-  "tour_review:Claude edits, you review"
-  "tour_statusline:Reading the status line"
-  "tour_resume:Close anything, pick up later"
-  "tour_habits:Daily habits"
+  "launch::Land in herdr, one workspace per repo"
+  "navigation::Moving around"
+  "agents::Run and juggle agents"
+  "tabs::Tabs inside one repo"
+  "editor:editor:Neovim next to your agent"
+  "review:review:Claude edits, you review"
+  "files:files:Browsing files with yazi"
+  "github:github:PRs and issues with gh-dash"
+  "statusline:statusline:Reading the status line"
+  "habits::Pick up later, and daily habits"
 )
 
+# tour_ready GROUP: true if the tour's section for GROUP runs: no group, or the
+# group selected and its tool installed.
+tour_ready() {
+  [[ -n "$1" ]] || return 0
+  selected "$1" || return 1
+  case "$1" in
+    editor) command -v nvim >/dev/null 2>&1 ;;
+    review) command -v lazygit >/dev/null 2>&1 ;;
+    files) command -v yazi >/dev/null 2>&1 ;;
+    # Captured first: under pipefail, grep -q quitting early could SIGPIPE gh.
+    github) local ext; ext=$(gh extension list 2>/dev/null) && [[ "$ext" == *gh-dash* ]] ;;
+    statusline) statusline_configured ;;
+  esac
+}
+
+# tour_hunk: true if herdr-hunk is set up and actually installed, so the tour
+# can point at tab 4's review and its keys.
+tour_hunk() {
+  local plugins
+  hunk_ready || return 1
+  # Captured first: under pipefail, a match quitting early could SIGPIPE herdr.
+  plugins=$(herdr plugin list 2>/dev/null) && [[ "$plugins" == *"$HUNK_ID"* ]]
+}
+
+# tour_sections: the TOUR entries this user's tour runs, one per line.
+tour_sections() {
+  local entry rest
+  for entry in "${TOUR[@]}"; do
+    rest=${entry#*:}
+    tour_ready "${rest%%:*}" && printf '%s\n' "$entry"
+  done
+  return 0
+}
+
 stage_tour() {
-  local entry i=0
+  local entry rest sections=() i=0
   # Its screens are for reading, which a --yes re-run would flash past.
   if [[ "$YES" == 1 && "$ONLY" != *",tour,"* ]]; then
     note "skipped with --yes. Replay it any time: bash $SCRIPT_PATH --tour"
     return 0
   fi
-  for entry in "${TOUR[@]}"; do
+  while IFS= read -r entry; do sections+=("$entry"); done < <(tour_sections)
+  for entry in "${sections[@]}"; do
     i=$((i + 1))
     # The first screen sits under the stage header; each later one gets its own.
     if (( i > 1 )); then
       _clear
       printf '\n%s%s▸ Stage %s/%s · %s%s\n' "$BOLD" "$BLUE" "$_STAGE_INDEX" "$TOTAL_STAGES" "Guided tour" "$RESET"
     fi
-    printf '%s  Tour %s/%s · %s%s\n\n' "$BOLD" "$i" "${#TOUR[@]}" "${entry#*:}" "$RESET"
-    "${entry%%:*}"
+    rest=${entry#*:}
+    printf '%s  Tour %s/%s · %s%s\n\n' "$BOLD" "$i" "${#sections[@]}" "${rest#*:}" "$RESET"
+    "tour_${entry%%:*}"
+    if (( i == ${#sections[@]} )); then
+      pause "Press Enter to finish"
+    elif ! tour_next $((i + 1)) "${#sections[@]}"; then
+      printf '\n'
+      note "Tour skipped. Replay it any time: bash $SCRIPT_PATH --tour"
+      return 0
+    fi
   done
+}
+
+# tour_next N TOTAL: the pause between screens. Enter goes on to screen N of
+# TOTAL; s skips the rest of the tour, and returns false.
+tour_next() {
+  [[ "${YES:-0}" == 1 ]] && return 0
+  local reply=""
+  printf '  %sPress Enter for %s of %s, or s to skip the rest of the tour%s ' "$DIM" "$1" "$2" "$RESET"
+  read -r reply || true
+  [[ ! "$reply" =~ ^[Ss] ]]
+}
+
+# tour_open_repo: how this user opens a repo as a workspace.
+tour_open_repo() {
+  if selected jumper; then
+    step "prefix m (Cmd-O), type part of a repo name, Enter. A workspace for it appears in the sidebar."
+  else
+    step "In any pane, cd into a repo, then prefix Shift-N. A workspace for it appears in the sidebar."
+  fi
 }
 
 tour_launch() {
   if [[ -z "${HERDR_ENV:-}" ]]; then
-    say "The tour runs inside herdr, so it survives closing Ghostty (you'll try that in step 8)."
+    say "The tour runs inside herdr, so it survives closing Ghostty (you'll try that at the end)."
     printf 'bash %q --tour' "$SCRIPT_PATH" | pbcopy
     step "Go to your herdr window. No herdr window? Close all Ghostty windows, then click"
     step "Ghostty in the Dock: it opens straight into herdr."
@@ -3379,7 +3445,7 @@ tour_launch() {
   note "Coming back here at any point: prefix g (Cmd-P), pick the 'tour' tab."
   printf '\n'
   say "One workspace per repo:"
-  step "prefix m (Cmd-O), type part of a repo name, Enter. A workspace for it appears in the sidebar."
+  tour_open_repo
   step "Do the same for two more repos. The tour calls them repo A, B and C."
   printf '\n'
   say "Switch between repos:"
@@ -3387,18 +3453,28 @@ tour_launch() {
   step "prefix w: workspace list, arrows and Enter. Or click a name in the sidebar."
   step "prefix Shift-W renames a workspace. prefix Shift-D closes one (it asks first)."
   note "Each workspace keeps its own tabs, panes, running processes and directories."
-  pause "Press Enter for step 2 of 9"
 }
 
 tour_navigation() {
+  local popups=()
+  tour_ready review && popups+=("d lazygit")
+  tour_ready files && popups+=("f yazi")
+  tour_ready github && popups+=("i GitHub PRs")
   say "Everything nests: Ghostty window › workspace (a repo) › tab › pane › popup."
   printf '\n'
-  note "  Workspace  prefix m open repo · prefix , / . prev/next · prefix w list"
+  if selected jumper; then
+    note "  Workspace  prefix m open repo · prefix , / . prev/next · prefix w list"
+  else
+    note "  Workspace  prefix Shift-N new · prefix , / . prev/next · prefix w list"
+  fi
   note "  Tab        prefix c (Cmd-T) new · Cmd-1…9 jump · prefix n / p next/prev · prefix Shift-T rename"
   note "  Pane       Cmd-D right · Cmd-Shift-D down · prefix h j k l move · prefix z zoom · prefix x close"
   note "  Agent      prefix a / Shift-V next/previous agent · prefix o latest notification"
   note "  Anything   prefix g (Cmd-P) goto picker · prefix Space back to the last pane"
-  note "  Popups     prefix d lazygit · f yazi · i GitHub PRs   (q closes)"
+  if (( ${#popups[@]} )); then
+    local list; list=$(printf '%s · ' "${popups[@]}")
+    note "  Popups     prefix ${list% · }   (q closes)"
+  fi
   note "  Mouse      click sidebar rows, tabs and panes; drag borders to resize"
   note "  Stuck?     prefix ? lists every key · run 'keys' for the cheat sheet"
   printf '\n'
@@ -3406,9 +3482,8 @@ tour_navigation() {
   step "prefix . to jump to repo A. Cmd-D twice: three panes."
   step "prefix h / prefix l to hop between them, prefix z to zoom one and again to unzoom."
   step "prefix x on two panes to get back to one."
-  step "prefix d: lazygit pops up over the pane. q closes it."
+  tour_ready review && step "prefix d: lazygit pops up over the pane. q closes it."
   step "prefix g, pick 'tour' to come back."
-  pause "Press Enter for step 3 of 9"
 }
 
 tour_agents() {
@@ -3434,42 +3509,54 @@ tour_agents() {
   printf '\n'
   note "Agents can drive herdr too. Ask Claude: 'start the dev server in a herdr pane next to you"
   note "and tell me when it is ready'."
-  pause "Press Enter for step 4 of 9"
 }
 
 tour_tabs() {
-  say "Inside one repo, give each kind of work its own tab so every view stays put:"
+  local tabs=() name n=0
+  [[ -n "$DEFAULT_TABS" ]] && IFS=',' read -ra tabs <<< "$DEFAULT_TABS"
+  say "Inside one repo, give each kind of work its own tab so every view stays put."
   printf '\n'
-  note "  1 agents        Claude Code / Codex"
-  note "  2 source code   Neovim on the files (with an agent beside it, next step)"
-  note "  3 local server  npm run dev, logs"
-  note "  4 git review    hunk-by-hunk review of what the agent did"
-  printf '\n'
-  say "If you chose default tabs, every new workspace and worktree already opens with"
-  say "these, so there is nothing to set up per repo. With herdr-hunk installed, tab 4"
-  say "opens straight into the review. It starts empty in a new repo: once the agent has"
-  say "edited something, run the 'hunk: reload the open review' action to refresh it."
-  printf '\n'
-  step "In the 'source code' tab run:  v .   to bring up nvim."
-  step "In 'local server' start the dev server (e.g. npm run dev). Cmd-D and run the tests in"
-  step "watch mode on the right."
+  if (( ${#tabs[@]} )); then
+    say "Every new workspace and worktree already opens with your tabs:"
+    for name in "${tabs[@]}"; do
+      n=$((n + 1))
+      note "  $n $name"
+    done
+    if tour_hunk && (( ${#tabs[@]} >= 4 )); then
+      printf '\n'
+      say "Tab 4 opens straight into herdr-hunk's review. It starts empty in a new repo: once the"
+      say "agent has edited something, run the 'hunk: reload the open review' action to refresh it."
+    fi
+    printf '\n'
+    (( ${#tabs[@]} >= 2 )) && tour_ready editor && step "In tab 2 (${tabs[1]}) run:  v .   to bring up nvim."
+    if (( ${#tabs[@]} >= 3 )); then
+      step "In tab 3 (${tabs[2]}) start the dev server (e.g. npm run dev). Cmd-D and run the tests in"
+    else
+      step "Cmd-T for a new tab, start the dev server (e.g. npm run dev). Cmd-D and run the tests in"
+    fi
+    step "watch mode on the right."
+    step "prefix Shift-T renames a tab, Cmd-T adds one."
+  else
+    say "For example: agents, source code, local server. Make them by hand:"
+    step "prefix c (Cmd-T) for a new tab, prefix Shift-T to name it."
+    step "In one tab start the dev server (e.g. npm run dev). Cmd-D and run the tests in"
+    step "watch mode on the right."
+  fi
   step "Cmd-1 / Cmd-2 / Cmd-3 jump between tabs. prefix n / p cycles through them."
-  step "prefix Shift-T renames a tab, Cmd-T adds one."
   printf '\n'
   note "New tabs and splits open in the directory of the pane you're in."
   note "Keep the same tab order in every repo, and Cmd-1…4 mean the same thing everywhere."
   note "The dev server keeps running when you switch repos, detach, or close Ghostty."
-  pause "Press Enter for step 5 of 9"
 }
 
-tour_nvim() {
+tour_editor() {
   say "Recommended layout for coding with an agent: editor and agent side by side."
   printf '\n'
   note "  ┌─────────── nvim (60%) ───────────┬──── claude (40%) ────┐"
   note "  │ read code, review diffs, fix up  │ prompts, plans, runs │"
   note "  └──────────────────────────────────┴──────────────────────┘"
   printf '\n'
-  step "In repo A's 'source code' tab (nvim open): Cmd-D, run  claude  in the right pane."
+  step "In repo A: run  v .  to open nvim, then Cmd-D and run  claude  in the right pane."
   step "Drag the border so nvim gets about 60%."
   step "prefix Space flips between nvim and Claude. prefix z zooms whichever you're in."
   printf '\n'
@@ -3477,92 +3564,100 @@ tour_nvim() {
   note "  files Claude edits reload by themselves within a second, no :e! needed"
   note "  ]h / [h jump between changed hunks · Space g h p previews a hunk inline"
   note "  Space g v reviews all uncommitted changes (Diffview) · Space g V closes it"
-  note "  Space g g opens lazygit inside nvim · Space g s lists changed files"
+  if tour_ready review; then
+    note "  Space g g opens lazygit inside nvim · Space g s lists changed files"
+  else
+    note "  Space g s lists changed files"
+  fi
   printf '\n'
   step "Long prompt? In Claude press Ctrl-G: it opens in nvim. :wq puts the text back in the prompt."
   note "Point Claude at code with @path (e.g. @src/app/page.tsx) instead of pasting it."
-  pause "Press Enter for step 6 of 9"
 }
 
 tour_review() {
   say "Let Claude change one file, then review it before anything gets committed."
   printf '\n'
-  step "In repo A's Claude (source code tab): 'Add a one-line comment at the top of README.md saying"
-  step "what this repo is'. Approve the edit."
-  step "In nvim: Space Space, open README.md. It updates on its own; the gutter marks the change."
+  step "In repo A's Claude: 'Add a one-line comment at the top of README.md saying what this"
+  step "repo is'. Approve the edit."
+  tour_ready editor && step "In nvim: Space Space, open README.md. It updates on its own; the gutter marks the change."
   printf '\n'
   say "Pick a review style:"
-  if hunk_ready; then
+  if tour_hunk; then
     step "herdr-hunk: prefix Shift-H, or tab 4. Comment on a line, then prefix Shift-S sends"
     step "your comments to the agent that made the change."
   fi
   step "Terminal: in any pane run  gd  for the plain git diff. q quits."
-  step "Neovim: Space g v. Changed files left, before/after right. Space g V closes."
+  tour_ready editor && step "Neovim: Space g v. Changed files left, before/after right. Space g V closes."
   step "lazygit: prefix d. Enter on the file, space stages a line or hunk."
   printf '\n'
   step "Clean up: in lazygit select README.md and press d to discard the change."
   note "Habit: review every agent change like this before you commit, and commit in small steps."
-  pause "Press Enter for step 7 of 9"
+}
+
+tour_files() {
+  say "yazi browses files in three columns, with previews of code, images and PDFs."
+  printf '\n'
+  step "prefix f (Cmd-E): yazi pops up over the pane, in that pane's directory."
+  step "h j k l or the arrows move, Enter opens a file, / searches, q closes."
+  step "Space selects files; then y copies, x cuts, p pastes, d moves to the bin."
+  printf '\n'
+  step "In a shell, run  y  instead: quit yazi and the shell is in the folder you ended up in."
+  note "Found the file you mean? Give it to Claude as @path rather than pasting it."
+}
+
+tour_github() {
+  say "gh-dash lists your PRs, review requests and issues without leaving the terminal."
+  printf '\n'
+  step "prefix i: gh-dash pops up. j / k move between rows, s switches between PRs and issues."
+  step "On a PR: d shows its diff, c comments, o opens it in the browser."
+  step "q closes it."
+  printf '\n'
+  note "Ask Claude to fix review comments: 'address the comments on PR 12', then review its"
+  note "change before pushing."
 }
 
 tour_statusline() {
-  if ! statusline_configured; then
-    note "No status line set up, so there's nothing to show here."
-    note "Add it any time: bash $SCRIPT_PATH --only choices,statusline"
-    pause "Press Enter for step 8 of 9"
-    return 0
-  fi
   say "Look under the prompt in any Claude pane (it fills in after the first reply):"
   printf '\n'
   note "  line 1   model · effort level │ directory │ worktree (only inside a worktree)"
   note "  line 2   context % (tokens in context / window) │ session cost │ 5h limit + reset time │ week limit"
   note "  colours  percentages go yellow at 50% and red at 80%"
   printf '\n'
-  step "Type /effort and pick a different level: the effort label changes."
-  step "Type /model and switch: the model name (and maybe the window size) changes."
-  step "Open Claude in the worktree workspace from step 3: the worktree segment appears."
+  step "Find the effort level on line 1: it is the reasoning effort this session runs at."
+  step "Ask Claude something with a long answer: the context % and session cost go up."
+  step "Open Claude in the worktree workspace from the agents screen: the worktree segment appears."
   printf '\n'
   note "Context going yellow? /compact summarises the conversation and frees space."
   note "Starting something unrelated? /clear starts fresh (session cost goes back to \$0)."
-  note "Near a limit on a heavy day? Lower /effort for routine work."
-  pause "Press Enter for step 8 of 9"
-}
-
-tour_resume() {
-  say "herdr keeps everything in a background server, so closing is safe at every level:"
-  printf '\n'
-  step "One agent: /exit in Claude. The pane stays a shell. Later in that pane or repo:"
-  step "  claude --continue (latest conversation) or claude --resume (pick one)."
-  step "One pane: prefix x. One repo: prefix Shift-D on its workspace. Reopen it with prefix m,"
-  step "  then claude --resume."
-  step "Ghostty itself: Cmd-Q. Agents, dev servers and this tour keep running."
-  step "  Click Ghostty in the Dock: herdr reattaches exactly where you were. Try it now."
-  printf '\n'
-  say "After a reboot, or 'herdr server stop':"
-  note "  herdr restores workspaces, tabs, panes and directories, and resumes Claude and Codex"
-  note "  conversations. Other processes (dev servers, watchers) restart as plain shells: re-run them."
-  printf '\n'
-  note "A plain shell without herdr: Cmd-N while herdr is open, or prefix q to detach this window."
-  pause "Press Enter for step 9 of 9"
 }
 
 tour_habits() {
-  say "Habits that make this setup pay off:"
+  say "herdr keeps everything in a background server, so closing is safe at every level:"
+  step "One agent: /exit in Claude. Later: claude --continue (latest) or claude --resume (pick one)."
+  step "One pane: prefix x. One repo: prefix Shift-D on its workspace; open it again as before."
+  step "Ghostty itself: Cmd-Q. Agents, dev servers and this tour keep running."
+  step "  Click Ghostty in the Dock: herdr reattaches exactly where you were. Try it now."
+  note "After a reboot, herdr restores workspaces, tabs and panes and resumes Claude and Codex."
+  note "Dev servers and watchers come back as plain shells: re-run them."
   printf '\n'
-  note "• One workspace per repo, same tab order everywhere (agents, source code, local server, git review)."
-  note "• Parallel work on one repo: one worktree per agent (prefix Shift-G). Merge via lazygit or a PR."
+  local review="gd"
+  tour_ready editor && review+=", Space g v"
+  tour_ready review && review+=" or lazygit"
+  say "Habits that make this setup pay off:"
+  note "• One workspace per repo, same tab order everywhere."
+  note "• Parallel work on one repo: one worktree per agent (prefix Shift-G)."
   note "• Let agents own their terminals: ask Claude to run the dev server or tests in a herdr pane."
   note "• Don't watch agents work. Notifications and prefix a bring you back when one needs you."
-  note "• Review before every commit (Space g v or lazygit). Small commits make agent work easy to undo."
+  note "• Review before every commit ($review). Small commits make agent work easy to undo."
   note "• Name sessions with /rename so claude --resume is readable. /clear between unrelated tasks."
-  note "• Watch the status line: /compact before context goes red; mind the 5h and week limits."
+  tour_ready statusline &&
+    note "• Watch the status line: /compact before context goes red; mind the 5h and week limits."
   note "• One-off command? Ctrl-\` from any app gives a plain shell without touching your layout."
-  note "• Copy agent output: prefix e opens a pane's scrollback in nvim, prefix [ for copy mode."
+  note "• Copy agent output: prefix [ for copy mode, prefix e opens a pane's scrollback in your editor."
   note "• Weekly: brew upgrade, then 'herdr integration status' to confirm the agent hooks are current."
   printf '\n'
   step "Run  keys  in any shell for the cheat sheet."
   step "Replay this tour any time: bash $SCRIPT_PATH --tour"
-  pause "Press Enter to finish"
 }
 
 # cheatsheet: the cheat sheet `keys` opens, with only the selected tools. A

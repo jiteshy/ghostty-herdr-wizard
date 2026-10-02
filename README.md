@@ -78,7 +78,7 @@ Each step checks your files right before it runs. If it is about to replace a fi
 
 **`statusline`.** Add the Claude Code status line.
 
-**`tour`.** Nine short screens. You open repos, start agents, split panes, let Claude change a file, review the change, and close and resume everything. The tour teaches you the keys while you use them. Type `keys` later to see the full list.
+**`tour`.** Short screens built from what you installed: five for a minimal setup, up to ten with every tool. You open repos, start agents, split panes and tabs, and close and resume everything. Then, for each tool you chose, one screen on it: Neovim next to your agent, reviewing Claude's change, yazi, gh-dash and the status line. The tour teaches you the keys while you use them. Press `s` at any screen to skip the rest. Type `keys` later to see the full list.
 
 ## Tests
 
