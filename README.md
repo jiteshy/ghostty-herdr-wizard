@@ -3,7 +3,7 @@
 **One bash script sets up a Mac terminal that runs your coding agents.**
 
 The script installs and configures the terminal, the tools and the agent integrations. It then shows you how to use them.
-test change
+
 After it runs, you can:
 
 - keep every repo open in the same window, and move between them with one key
@@ -64,9 +64,9 @@ The script does three types of work:
 2. It writes config files. If a file exists and is different, the script shows you the changes and asks you first. It keeps a copy of the old file in `~/.ghostty-herdr-wizard/backups/`.
 3. It tells you what to do for the steps that need a person. Examples: approve a macOS permission, or sign in to GitHub.
 
-**`choices`.** All the questions come first. First, what to install: Ghostty, herdr and terminal-notifier always, then one checkbox per group of tools that need each other (Nerd Font + icons, starship prompt, project jumper + fuzzy find, shell typing help, editor, lazygit for review, file manager, GitHub, Claude Code status line). All are ticked to start with. A group you untick is not installed and its step is skipped. Unticking icons gives plain text, which works in any font, so nothing shows as boxes in a terminal without a Nerd Font. Then the prompt style (plain pure or powerline Tokyo Night, both showing only folder and git branch, or leave your prompt alone), then herdr's prefix key (Ctrl-Space by default, Ctrl-B needs no macOS changes but clashes with Claude Code), and the colour mode for Ghostty, herdr, Neovim and yazi (follow the system, always dark, or leave your themes alone). Then the folder with your repos (only with the project jumper), and the tabs that new workspaces open with. The answers are saved, and the next run offers to use them again. Then the script shows its plan: how many tools it installs, which of your files it replaces, and the points where it needs you. Nothing happens until you say yes.
+**`choices`.** All the questions come first. First, what to install: Ghostty, herdr and terminal-notifier always, then one checkbox per group of tools that need each other (Nerd Font + icons, starship prompt, project jumper + fuzzy find, shell typing help, editor, review (lazygit and herdr-hunk), file manager, GitHub, Claude Code status line). All are ticked to start with. A group you untick is not installed and its step is skipped. Unticking icons gives plain text, which works in any font, so nothing shows as boxes in a terminal without a Nerd Font. Then herdr's prefix key (Ctrl-Space by default, Ctrl-B needs no macOS changes but clashes with Claude Code), the colour mode for Ghostty, herdr, Neovim and yazi (follow the system, always dark, or leave your themes alone), and the prompt style (plain pure or powerline Tokyo Night, both showing only folder and git branch, or leave your prompt alone). Then the folder with your repos (only with the project jumper), and the tabs that new workspaces open with. The answers are saved, and the next run offers to use them again. Then the script shows its plan: how many tools it installs, which of your files it replaces, and the points where it needs you. Nothing happens until you say yes.
 
-Each step checks your files right before it runs. If it is about to replace a file you already have, it says so and names the file. A copy goes to `~/.ghostty-herdr-wizard/backups/`, and `--revert` puts it back. `--revert` leaves the tools installed; `--uninstall` runs the revert first, then asks about each tool the wizard installed, one at a time. Tools you already had are never offered, and Node is never touched.
+Each step checks your files right before it runs. If it is about to replace a file you already have, it says so and names the file. A copy goes to `~/.ghostty-herdr-wizard/backups/`, and `--revert` puts it back. See [Undoing it](#undoing-it) for what `--revert` and `--uninstall` can and cannot undo.
 
 **`install`.** Install everything with Homebrew in one go: Ghostty, herdr and the tools you picked. Tools of steps you skip with `--skip` are not installed.
 
@@ -74,17 +74,28 @@ Each step checks your files right before it runs. If it is about to replace a fi
 
 **`prompt`, `shell`: the shell.** Set up the Starship prompt in your chosen style. Add history search, aliases for `bat`, `eza`, `fzf` and the other command-line tools, and a command that finds and opens your repos.
 
-**`editor`, `review`, `yazi`, `github`: code and git.** Neovim with LazyVim, `lazygit` to stage and commit, `yazi` to browse files, and the GitHub CLI with `gh-dash` for pull requests.
+**`editor`, `review`, `yazi`, `github`: code and git.** Neovim with LazyVim, `lazygit` to stage and commit, herdr-hunk to review the agent's diff hunk by hunk and send your comments back to it, `yazi` to browse files, and the GitHub CLI with `gh-dash` for pull requests. herdr-hunk needs Node 22.12 or newer. The wizard checks your Node but never installs or upgrades it.
 
 **`statusline`.** Add the Claude Code status line.
 
 **`tour`.** Short screens built from what you installed: five for a minimal setup, up to ten with every tool. You open repos, start agents, split panes and tabs, and close and resume everything. Then, for each tool you chose, one screen on it: Neovim next to your agent, reviewing Claude's change, yazi, gh-dash and the status line. The tour teaches you the keys while you use them. Press `s` at any screen to skip the rest. Type `keys` later to see the full list.
 
+## Undoing it
+
+`--revert` undoes the config changes the wizard recorded in `~/.ghostty-herdr-wizard/journal.tsv`. Files it replaced come back as they were. Files and folders it created are moved to `~/.ghostty-herdr-wizard/reverted/`, never deleted, and `--revert --restore` puts them back. Where it only added its own lines to a file, such as `~/.zshrc`, `~/.zprofile` or Neovim's `autocmds.lua`, those lines are removed and yours stay. In `~/.claude/settings.json` (and `~/.gitconfig`, which older versions wrote to) only the keys it set go back to what they were. If you changed a file after the wizard wrote it, `--revert` shows you the diff and keeps your version unless you say otherwise.
+
+What `--revert` cannot undo:
+
+- **System Settings.** The wizard never changes these itself, so it cannot change them back. At the end, `--revert` prints a checklist of the ones you changed during setup and offers to open each settings pane: turn the Ctrl-Space input source shortcuts back on, turn off notifications for terminal-notifier, and turn off Ghostty's Accessibility access. You do these by hand.
+- **Installed tools.** They stay, and so do herdr plugins such as herdr-hunk. `--uninstall` runs the revert first, then asks about each tool the wizard installed, one at a time. Tools you already had are never offered, and Node is never touched.
+- **What the tools save for themselves.** Your GitHub sign-in, Neovim's downloaded plugins under `~/.local/share/nvim`, and herdr's saved sessions are not wizard config, so they stay.
+- **Runs from before the journal.** Backups from 1.0.0 are in `~/.ghostty-herdr-wizard-backups/`. `--revert` does not know about them.
+
 ## Tests
 
-Unit-style checks live in `tests/`, one file per area: `journal_test.sh` (journal, backups, `--revert`), `selection_test.sh` (the choices screen), `stages_test.sh` (named stages), `plan_test.sh` (REPLACES badges and the plan), `glyphs_test.sh` (the icons switch), `tabs_test.sh` (default tabs), `review_test.sh` (herdr-hunk), `prefix_theme_test.sh` (prefix and colour), `prompt_test.sh` (prompt styles), `uninstall_test.sh` (`--uninstall`), and `revert_acceptance_test.sh`. Run one with e.g. `bash tests/journal_test.sh`.
+Unit-style checks live in `tests/`, one file per area: `journal_test.sh` (journal, backups, `--revert`), `selection_test.sh` (the choices screen), `stages_test.sh` (named stages), `plan_test.sh` (REPLACES badges and the plan), `glyphs_test.sh` (the icons switch), `tabs_test.sh` (default tabs), `review_test.sh` (herdr-hunk), `prefix_theme_test.sh` (prefix and colour), `prompt_test.sh` (prompt styles), `uninstall_test.sh` (`--uninstall`), `tour_test.sh` (the tour built from your choices), and `revert_acceptance_test.sh`. Run one with e.g. `bash tests/journal_test.sh`.
 
-`bash tests/revert_acceptance_test.sh` is the revert acceptance test: it snapshots a throwaway home, runs the whole wizard with everything selected (only the `macos` and `tour` steps are skipped — those need a human), runs `--revert`, and diffs the home against the snapshot, for both a pristine and a seeded home. Run it before any change to the revert path.
+`bash tests/revert_acceptance_test.sh` is the revert acceptance test: it snapshots a throwaway home, runs the whole wizard with everything selected (only the `macos` and `tour` steps are skipped, because those need a person), runs `--revert`, and diffs the home against the snapshot, for both a pristine and a seeded home. Run it before any change to the revert path.
 
 ## Thanks
 

@@ -3814,7 +3814,7 @@ re-running the wizard with `--only choices,herdr`, or edit
 | prefix `Space` | back to the last pane |
 | prefix `z` · Cmd-Shift-Enter | zoom pane |
 | prefix `x` | close pane |
-| prefix `e` | open the pane's scrollback in nvim |
+| prefix `e` | open the pane's scrollback in your editor |
 | prefix `[` | copy mode: `v` select, `y` copy, `/` search |
 | prefix `b` | toggle sidebar |
 
@@ -4150,7 +4150,8 @@ usage: bash $(basename "$0") [--yes] [--from NAME | --only NAME,NAME | --skip NA
   --list           print the stage names and exit
   --revert         undo every config change the wizard made, back to how it was before
                    (installed tools stay). Nothing is deleted: what it takes away is
-                   moved to ~/.ghostty-herdr-wizard/reverted/
+                   moved to ~/.ghostty-herdr-wizard/reverted/. What only System
+                   Settings can undo is printed as a checklist for you to do by hand
   --revert --restore
                    move what the last --revert took away back into place
   --uninstall      run the full --revert first, then offer to remove each
