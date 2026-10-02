@@ -75,8 +75,8 @@ choices_run() {
 
 test_choices_are_asked_once_and_saved() {
   new_home
-  # banner, untick icons, accept, prefix/theme/prompt defaults, projects folder, create it, my tab names (four of them), done
-  choices_run '' 1 '' '' '' '' "$H/repos" y 2 ai code srv diff ''
+  # banner, untick icons, accept, prefix/theme/prompt defaults, projects folder, create it, my own tabs, their names, done
+  choices_run '' 1 '' '' '' '' "$H/repos" y 2 'ai, code, srv, diff' ''
   check "grep -qx 'GLYPHS=off' '$STATE/choices.env'" "icons answer saved"
   check "grep -qx 'PROJECTS_DIR=$H/repos' '$STATE/choices.env'" "projects folder saved"
   check "grep -qx 'TABS=ai,code,srv,diff' '$STATE/choices.env'" "tab names saved"
@@ -102,10 +102,10 @@ test_a_rerun_offers_last_times_answers() {
   check "grep -qx 'TABS=none' '$STATE/choices.env'" "no default tabs is saved as none"
   wizard 'printf "[%s]" "$DEFAULT_TABS"'
   check "[[ '$(cat "$T/out")' == '[]' ]]" "saved none means no default tabs (got '$(cat "$T/out")')"
-  # Changing their mind: the suggested four again.
+  # Changing their mind: the suggested three again.
   choices_run '' n '' '' '' '' '' 1 ''
-  check "grep -qx 'TABS=agents,source code,local server,git review' '$STATE/choices.env'" \
-    "after no tabs, the suggested four are one answer away"
+  check "grep -qx 'TABS=agents,source code,local server' '$STATE/choices.env'" \
+    "after no tabs, the suggested three are one answer away"
   cleanup
 }
 

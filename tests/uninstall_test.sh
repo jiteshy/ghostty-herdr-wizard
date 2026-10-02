@@ -224,7 +224,7 @@ test_uninstall_after_a_full_run_leaves_no_dangling_references() {
 GLYPHS=on
 TOOLS=prompt,jumper,typing,editor,review,files,github,statusline
 PROMPT_STYLE=pure
-TABS=agents,source code,local server,git review
+TABS=agents,source code,local server
 PROJECTS_DIR=$H/repos
 EOF
   printf '# my own aliases\nalias gs="git status"\n' > "$H/.zshrc"

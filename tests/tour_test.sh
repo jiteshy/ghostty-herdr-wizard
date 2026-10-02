@@ -90,6 +90,36 @@ test_a_minimal_tour_names_no_unselected_tool() {
   cleanup
 }
 
+# tabs_screen TABS [CODE]: the tabs and review screens for these default tabs,
+# editor and review selected and installed.
+tabs_screen() {
+  wizard "PATH='$TOUR_PATH'; TOOLS=',editor,review,'; DEFAULT_TABS='$1'; ${2:-} tour_tabs; tour_review"
+}
+
+test_the_tabs_screen_follows_the_users_tabs() {
+  new_home
+  tools_on_path
+  tabs_screen 'agents,source code,local server' 'tour_hunk() { return 0; };'
+  check "grep -q '4 git review' '$T/out'" "suggested three with herdr-hunk: git review listed as tab 4"
+  check "grep -q 'In tab 2 (source code)' '$T/out' && grep -q 'In tab 3 (local server)' '$T/out'" \
+    "the suggested layout gets numbered steps"
+  check "grep -q 'Cmd-1…4 jump' '$T/out'" "Cmd range covers the four"
+  check "grep -q 'or tab 4 (git review)' '$T/out'" "the review screen points at tab 4"
+
+  tabs_screen 'ai,code' 'tour_hunk() { return 1; };'
+  check "grep -q '2 code' '$T/out' && ! grep -q 'git review' '$T/out'" "two own tabs, no herdr-hunk: just those two"
+  check "! grep -qE 'tab [0-9] \\(' '$T/out'" "no numbered steps for a layout of the user's own"
+  check "grep -q 'Cmd-1 / Cmd-2 jump' '$T/out' && ! grep -qE 'Cmd-3|…4' '$T/out'" "Cmd range covers just the two"
+
+  tabs_screen 'a,b,c,d' 'tour_hunk() { return 0; };'
+  check "grep -q '5 git review' '$T/out'" "four own tabs with herdr-hunk: git review is tab 5"
+  check "grep -q 'or tab 5 (git review)' '$T/out'" "and the review screen says so"
+
+  tabs_screen 'solo' 'tour_hunk() { return 1; };'
+  check "! grep -q 'jump between tabs' '$T/out'" "one tab: nothing to jump between"
+  cleanup
+}
+
 test_the_tour_can_be_skipped_from_any_screen() {
   new_home
   tools_on_path

@@ -319,15 +319,20 @@ BACKED_UP=() # paths this run copied into the backup store
 KEPT=()      # changes --revert left alone because the user edited them since
 WROTE=0      # set by install_file: 1 if its last call wrote the file
 
-# Tabs opened on every new workspace and worktree, in order: agents, source
-# code, local server, git review. Tab 4 opens the hunk review when herdr-hunk is
-# installed. Saved as the TABS choice; "none" (DEFAULT_TABS empty) turns the
-# plugin off.
-SUGGESTED_TABS="agents,source code,local server,git review"
+# Tabs opened on every new workspace and worktree, in order: the suggested
+# three, or one to four of the user's own. With herdr-hunk installed, a
+# REVIEW_TAB tab opening its review comes after them, so it is always the last
+# tab (tab 4 with the suggested three). Saved as the TABS choice; "none"
+# (DEFAULT_TABS empty) turns the plugin off.
+SUGGESTED_TABS="agents,source code,local server"
+REVIEW_TAB="git review"
+MAX_TABS=4
 DEFAULT_TABS=$(choice_get TABS || true)
 case "$DEFAULT_TABS" in
   none) DEFAULT_TABS="" ;;
   "") DEFAULT_TABS="$SUGGESTED_TABS" ;;
+  # Saved before the review tab came on top: four tabs, the last one review's.
+  *,*,*,"$REVIEW_TAB") DEFAULT_TABS="${DEFAULT_TABS%,"$REVIEW_TAB"}" ;;
 esac
 
 ok()  { printf '  %s✓%s %s\n' "$GREEN" "$RESET" "$1"; }
@@ -1696,7 +1701,7 @@ hunk_tools() {
     printf '|%s%s%s\n' "$DIM" "$line" "$RESET"
   done <<< "$gate"
   printf '|%sthen: bash %s --only review%s\n' "$DIM" "$SCRIPT_PATH" "$RESET"
-  printf '|%stab 4 stays a plain shell for now%s\n' "$DIM" "$RESET"
+  printf '|%snew workspaces get no %s tab for now%s\n' "$DIM" "$REVIEW_TAB" "$RESET"
 }
 
 # cluster_tools KEY: what the group KEY brings, one "tool|what it gives you"
@@ -2379,7 +2384,8 @@ EOF
 
 stage_review() {
   say "herdr-hunk: review the agent's diff hunk by hunk, comment on lines, and send the"
-  say "comments back to the agent that wrote it. prefix Shift-H opens it; so does tab 4."
+  say "comments back to the agent that wrote it. prefix Shift-H opens it, and so does the"
+  say "$REVIEW_TAB tab, the last one in every new workspace."
   say "lazygit: a full git UI. Stage single lines or hunks, commit, rebase, resolve conflicts."
   note "Opens with herdr prefix then d, or lg in any shell."
   stage_tools review
@@ -2395,7 +2401,7 @@ stage_review() {
 hunk_ready() { selected review && node_ok; }
 
 # hunk_config: herdr-hunk's own config. "overlay" opens a review over the
-# focused pane instead of beside it, so tab 4's review fills that tab.
+# focused pane instead of beside it, so the review tab's review fills that tab.
 hunk_config() {
   cat <<'EOF'
 # herdr-hunk config, written by ghostty-herdr-wizard.sh
@@ -2427,7 +2433,7 @@ install_hunk() {
     warn "herdr-hunk skipped: it $(head -n1 <<< "$gate")"
     note "  $(sed -n 2p <<< "$gate" | sed 's/^ *//')"
     note "then: bash $SCRIPT_PATH --only review"
-    [[ -n "$DEFAULT_TABS" ]] && note "tab 4 stays a plain shell for now"
+    [[ -n "$DEFAULT_TABS" ]] && note "new workspaces get no $REVIEW_TAB tab for now"
     SKIPPED+=("herdr-hunk needs Node $NODE_MIN+. Upgrade it, then: bash $SCRIPT_PATH --only review")
     return 0
   fi
@@ -2770,18 +2776,15 @@ stage_yazi() {
   pause
 }
 
-# ask_default_tabs: the one tabs question. Explains tabs, shows the four, then
-# offers them as they are, renamed, or none. Sets and saves DEFAULT_TABS (a
-# comma-separated list, empty for none); Enter keeps the current answer.
+# ask_default_tabs: the one tabs question. Explains tabs, shows the suggested
+# three (and herdr-hunk's review tab after them), then offers them as they
+# are, one to MAX_TABS of the user's own, or none. Sets and saves DEFAULT_TABS
+# (a comma-separated list, empty for none); Enter keeps the current answer.
 ask_default_tabs() {
-  local purposes=("Claude Code / Codex" "Neovim on the files" "npm run dev, logs" \
-    "hunk-by-hunk review of what the agent did")
-  local current=1 answer name i shown=() names=()
+  local purposes=("Claude Code / Codex" "Neovim on the files" "npm run dev, logs")
+  local current=1 answer i shown=()
   # read -a, not an unquoted split, so a tab named * isn't glob-expanded.
   IFS=',' read -ra shown <<< "$SUGGESTED_TABS"
-  # Renaming starts from the saved names, or the suggested four without them.
-  IFS=',' read -ra names <<< "$DEFAULT_TABS"
-  (( ${#names[@]} == 4 )) || names=("${shown[@]}")
   if [[ -z "$DEFAULT_TABS" ]]; then current=3
   elif [[ "$DEFAULT_TABS" != "$SUGGESTED_TABS" ]]; then current=2
   fi
@@ -2790,32 +2793,23 @@ ask_default_tabs() {
   note "A workspace is one repo. Tabs are separate terminals in it,"
   note "all in the same folder, all kept running."
   printf '\n'
-  say "herdr can open the same four in every new repo and worktree:"
+  say "herdr can open the same tabs in every new repo and worktree:"
   printf '\n'
-  for i in 0 1 2 3; do
+  for i in 0 1 2; do
     printf '  %d %-14s %s\n' $((i + 1)) "${shown[$i]}" "${purposes[$i]}"
   done
+  if selected review; then
+    printf '  + %-14s %s\n' "$REVIEW_TAB" "herdr-hunk's review of the agent's diff, always the last tab"
+  fi
   printf '\n'
-  say "1) use these four        (suggested)"
-  say "2) same idea, my names"
+  say "1) use these three       (suggested)"
+  say "2) my own tabs, 1 to $MAX_TABS of them"
   say "3) no default tabs, one plain tab"
   printf '\n'
   printf '  %schoice [%s]:%s ' "$BOLD" "$current" "$RESET"
   read -r answer || true
   case "${answer:-$current}" in
-    2)
-      note "Enter keeps the name shown."
-      for i in 0 1 2 3; do
-        printf '  %stab %d, %s [%s]:%s ' "$BOLD" $((i + 1)) "${purposes[$i]}" "${names[$i]}" "$RESET"
-        name=""
-        read -r name || true
-        name="${name//,/}"                        # commas separate the saved list
-        name="${name#"${name%%[![:space:]]*}"}"   # trim leading spaces
-        name="${name%"${name##*[![:space:]]}"}"   # trim trailing spaces
-        [[ -n "$name" ]] && names[$i]="$name"
-      done
-      DEFAULT_TABS="${names[0]},${names[1]},${names[2]},${names[3]}"
-      ;;
+    2) ask_tab_names ;;
     3) DEFAULT_TABS="" ;;
     *) DEFAULT_TABS="$SUGGESTED_TABS" ;;
   esac
@@ -2826,6 +2820,46 @@ ask_default_tabs() {
     ok "tabs: one plain tab (re-run this stage to change it)"
   fi
   printf '\n'
+}
+
+# ask_tab_names: the user's own tabs, one to MAX_TABS names on one line,
+# comma-separated. Sets DEFAULT_TABS. Enter keeps tabs of their own from last
+# time; no names at all falls back to the suggested three, saying so.
+ask_tab_names() {
+  local keep="" line name names=() parts=()
+  [[ -n "$DEFAULT_TABS" && "$DEFAULT_TABS" != "$SUGGESTED_TABS" ]] && keep="$DEFAULT_TABS"
+  while :; do
+    if [[ -n "$keep" ]]; then
+      printf '  %stab names, comma-separated, 1 to %s [%s]:%s ' "$BOLD" "$MAX_TABS" "${keep//,/, }" "$RESET"
+    else
+      printf '  %stab names, comma-separated, 1 to %s:%s ' "$BOLD" "$MAX_TABS" "$RESET"
+    fi
+    line=""
+    read -r line || true
+    if [[ -z "$line" && -n "$keep" ]]; then
+      DEFAULT_TABS="$keep"
+      return 0
+    fi
+    names=()
+    # read -a, not an unquoted split, so a tab named * isn't glob-expanded.
+    IFS=',' read -ra parts <<< "$line"
+    for name in ${parts[@]+"${parts[@]}"}; do
+      name="${name#"${name%%[![:space:]]*}"}"   # trim leading spaces
+      name="${name%"${name##*[![:space:]]}"}"   # trim trailing spaces
+      [[ -n "$name" ]] && names+=("$name")
+    done
+    if (( ${#names[@]} == 0 )); then
+      note "no names given, so the suggested three: ${SUGGESTED_TABS//,/, }"
+      DEFAULT_TABS="$SUGGESTED_TABS"
+      return 0
+    fi
+    if (( ${#names[@]} > MAX_TABS )); then
+      warn "${#names[@]} names: at most $MAX_TABS, please"
+      continue
+    fi
+    DEFAULT_TABS=$(IFS=','; printf '%s' "${names[*]}")
+    return 0
+  done
 }
 
 # write_worktree_tabs_plugin: install and register the herdr plugin that opens
@@ -2844,6 +2878,10 @@ write_worktree_tabs_plugin() {
     warn "no usable tab names, skipping the plugin"
     return 0
   fi
+  # The review tab only while the review group is selected: herdr-hunk stays
+  # installed after it is declined, like every tool.
+  local review="''"
+  selected review && review=$(printf '%q' "$REVIEW_TAB")
 
   install_file "$HERDR_PLUGIN_DIR/herdr-plugin.toml" <<'EOF'
 # herdr plugin, written by ghostty-herdr-wizard.sh
@@ -2885,7 +2923,8 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 
 HEAD
     printf '# The tabs to open. Edit this line to change them.\ntab_labels=(%s)\n\n' "$labels"
-    printf '# The tab that opens the hunk review, when herdr-hunk is installed. Empty for none.\nreview_tab=4\n\n'
+    printf '# The tab added after them for the herdr-hunk review, while herdr-hunk is\n'
+    printf '# installed. Empty for none.\nreview_label=%s\n\n' "$review"
     cat <<'TAIL'
 mode="${1:-workspace}"
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
@@ -2983,43 +3022,51 @@ for pane in data.get("result", {}).get("panes", []):
         break
 ') || cwd=""
 
-# The workspace already has its first tab; rename it instead of adding a fifth.
-"$herdr_bin" tab rename "$active_tab" "${tab_labels[0]}" >/dev/null 2>&1
-
-index=1
-review_tab_id=""
-while (( index < ${#tab_labels[@]} )); do
+# new_tab LABEL: add a tab named LABEL in the pane's directory, unfocused, and
+# print its id.
+new_tab() {
+  local created
   if [[ -n "$cwd" ]]; then
-    created=$("$herdr_bin" tab create --workspace "$workspace_id" --label "${tab_labels[$index]}" \
+    created=$("$herdr_bin" tab create --workspace "$workspace_id" --label "$1" \
       --cwd "$cwd" --no-focus 2>/dev/null)
   else
-    created=$("$herdr_bin" tab create --workspace "$workspace_id" --label "${tab_labels[$index]}" \
+    created=$("$herdr_bin" tab create --workspace "$workspace_id" --label "$1" \
       --no-focus 2>/dev/null)
   fi
-  if [[ "$(( index + 1 ))" == "${review_tab:-}" ]]; then
-    review_tab_id=$(printf '%s' "$created" | python3 -c '
+  printf '%s' "$created" | python3 -c '
 import json, sys
 try:
     sys.stdout.write(json.load(sys.stdin)["result"]["tab"]["tab_id"])
 except (ValueError, KeyError, TypeError):
     pass
-') || review_tab_id=""
-  fi
+'
+}
+
+# The workspace already has its first tab; rename it instead of adding another.
+"$herdr_bin" tab rename "$active_tab" "${tab_labels[0]}" >/dev/null 2>&1
+
+index=1
+while (( index < ${#tab_labels[@]} )); do
+  new_tab "${tab_labels[$index]}" >/dev/null
   index=$(( index + 1 ))
 done
 
-# Open the hunk review in its tab. `tab create` has no --command, so this goes
-# through the plugin action, which reviews the tab focused when it is invoked.
-# On a brand-new workspace there is nothing to review yet, so hunk shows the
-# working tree until you refresh it once the agent has edited something.
-# hunk's own review.placement decides where the pane opens; "overlay" keeps it
-# in this tab instead of adding a fifth.
+# The hunk review gets a tab of its own after the others, so it is always the
+# last. `tab create` has no --command, so the review goes through the plugin
+# action, which reviews the tab focused when it is invoked. On a brand-new
+# workspace there is nothing to review yet, so hunk shows the working tree
+# until you refresh it once the agent has edited something. hunk's own
+# review.placement decides where the pane opens; "overlay" keeps it in this tab
+# instead of adding another.
 # The list is captured first: under pipefail, grep -q quitting early could
 # SIGPIPE herdr and fail the check.
 plugins=$("$herdr_bin" plugin list 2>/dev/null) || plugins=""
-if [[ -n "$review_tab_id" && "$plugins" == *jhochenbaum.hunkdiff* ]]; then
-  "$herdr_bin" tab focus "$review_tab_id" >/dev/null 2>&1
-  "$herdr_bin" plugin action invoke review --plugin jhochenbaum.hunkdiff >/dev/null 2>&1
+if [[ -n "$review_label" && "$plugins" == *jhochenbaum.hunkdiff* ]]; then
+  review_tab_id=$(new_tab "$review_label") || review_tab_id=""
+  if [[ -n "$review_tab_id" ]]; then
+    "$herdr_bin" tab focus "$review_tab_id" >/dev/null 2>&1
+    "$herdr_bin" plugin action invoke review --plugin jhochenbaum.hunkdiff >/dev/null 2>&1
+  fi
 fi
 
 # Land on the first tab, not the last one created.
@@ -3036,7 +3083,11 @@ TAIL
     run herdr plugin unlink worktree-tabs
   fi
   if herdr plugin link "$HERDR_PLUGIN_DIR"; then
-    ok "plugin linked: new workspaces and worktrees open ${DEFAULT_TABS}"
+    if selected review; then
+      ok "plugin linked: new workspaces and worktrees open ${DEFAULT_TABS//,/, }, then $REVIEW_TAB with herdr-hunk"
+    else
+      ok "plugin linked: new workspaces and worktrees open ${DEFAULT_TABS//,/, }"
+    fi
   else
     warn "couldn't register the plugin with herdr"
     SKIPPED+=("link the tab plugin: herdr plugin link $HERDR_PLUGIN_DIR")
@@ -3365,7 +3416,7 @@ tour_ready() {
 }
 
 # tour_hunk: true if herdr-hunk is set up and actually installed, so the tour
-# can point at tab 4's review and its keys.
+# can point at the review tab and its keys.
 tour_hunk() {
   local plugins
   hunk_ready || return 1
@@ -3511,9 +3562,25 @@ tour_agents() {
   note "and tell me when it is ready'."
 }
 
+# tour_tab_list: the tabs a new workspace opens with, one per line: the user's
+# default tabs, then herdr-hunk's review tab when it is installed. Nothing
+# without default tabs.
+tour_tab_list() {
+  local tabs=()
+  [[ -n "$DEFAULT_TABS" ]] || return 0
+  IFS=',' read -ra tabs <<< "$DEFAULT_TABS"
+  tour_hunk && tabs+=("$REVIEW_TAB")
+  printf '%s\n' "${tabs[@]}"
+}
+
+# cmd_range N: the Cmd shortcuts for tabs 1 to N, as the tour prints them.
+cmd_range() {
+  if (( $1 == 2 )); then printf 'Cmd-1 / Cmd-2'; else printf 'Cmd-1…%s' "$1"; fi
+}
+
 tour_tabs() {
   local tabs=() name n=0
-  [[ -n "$DEFAULT_TABS" ]] && IFS=',' read -ra tabs <<< "$DEFAULT_TABS"
+  while IFS= read -r name; do tabs+=("$name"); done < <(tour_tab_list)
   say "Inside one repo, give each kind of work its own tab so every view stays put."
   printf '\n'
   if (( ${#tabs[@]} )); then
@@ -3522,30 +3589,38 @@ tour_tabs() {
       n=$((n + 1))
       note "  $n $name"
     done
-    if tour_hunk && (( ${#tabs[@]} >= 4 )); then
+    if tour_hunk; then
       printf '\n'
-      say "Tab 4 opens straight into herdr-hunk's review. It starts empty in a new repo: once the"
-      say "agent has edited something, run the 'hunk: reload the open review' action to refresh it."
+      say "The last one opens straight into herdr-hunk's review. It starts empty in a new repo: once"
+      say "the agent has edited something, run the 'hunk: reload the open review' action to refresh it."
     fi
     printf '\n'
-    (( ${#tabs[@]} >= 2 )) && tour_ready editor && step "In tab 2 (${tabs[1]}) run:  v .   to bring up nvim."
-    if (( ${#tabs[@]} >= 3 )); then
+    # Positions only mean something in the suggested layout.
+    if [[ "$DEFAULT_TABS" == "$SUGGESTED_TABS" ]]; then
+      tour_ready editor && step "In tab 2 (${tabs[1]}) run:  v .   to bring up nvim."
       step "In tab 3 (${tabs[2]}) start the dev server (e.g. npm run dev). Cmd-D and run the tests in"
     else
-      step "Cmd-T for a new tab, start the dev server (e.g. npm run dev). Cmd-D and run the tests in"
+      step "Start the dev server (e.g. npm run dev) in the tab you made for it. Cmd-D and run the tests in"
     fi
     step "watch mode on the right."
     step "prefix Shift-T renames a tab, Cmd-T adds one."
+    if (( ${#tabs[@]} > 1 )); then
+      step "$(cmd_range ${#tabs[@]}) jump between tabs. prefix n / p cycles through them."
+      printf '\n'
+      note "Keep the same tab order in every repo, and $(cmd_range ${#tabs[@]}) mean the same thing everywhere."
+    else
+      printf '\n'
+    fi
   else
     say "For example: agents, source code, local server. Make them by hand:"
     step "prefix c (Cmd-T) for a new tab, prefix Shift-T to name it."
     step "In one tab start the dev server (e.g. npm run dev). Cmd-D and run the tests in"
     step "watch mode on the right."
+    step "Cmd-1…9 jump between tabs. prefix n / p cycles through them."
+    printf '\n'
+    note "Keep the same tab order in every repo, and Cmd-1…9 mean the same thing everywhere."
   fi
-  step "Cmd-1 / Cmd-2 / Cmd-3 jump between tabs. prefix n / p cycles through them."
-  printf '\n'
   note "New tabs and splits open in the directory of the pane you're in."
-  note "Keep the same tab order in every repo, and Cmd-1…4 mean the same thing everywhere."
   note "The dev server keeps running when you switch repos, detach, or close Ghostty."
 }
 
@@ -3583,8 +3658,14 @@ tour_review() {
   printf '\n'
   say "Pick a review style:"
   if tour_hunk; then
-    step "herdr-hunk: prefix Shift-H, or tab 4. Comment on a line, then prefix Shift-S sends"
-    step "your comments to the agent that made the change."
+    local n; n=$(tour_tab_list | grep -c . || true)
+    if (( n )); then
+      step "herdr-hunk: prefix Shift-H, or tab $n ($REVIEW_TAB). Comment on a line, then prefix Shift-S"
+      step "sends your comments to the agent that made the change."
+    else
+      step "herdr-hunk: prefix Shift-H. Comment on a line, then prefix Shift-S sends your comments"
+      step "to the agent that made the change."
+    fi
   fi
   step "Terminal: in any pane run  gd  for the plain git diff. q quits."
   tour_ready editor && step "Neovim: Space g v. Changed files left, before/after right. Space g V closes."
@@ -3772,7 +3853,7 @@ re-running the wizard with `--only choices,herdr`, or edit
 {hunk}
 {hunk} | Keys | Does |
 {hunk} |---|---|
-{hunk} | prefix `Shift-H` | review changes (tab 4 opens one by itself) |
+{hunk} | prefix `Shift-H` | review changes (the last tab, git review, opens one by itself) |
 {hunk} | prefix `Shift-S` | send your review comments to the agent |
 {hunk} | prefix `Shift-C` | review the last commit |
 {hunk} | prefix `Shift-A` | review staged changes |

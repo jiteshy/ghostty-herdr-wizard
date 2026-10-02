@@ -123,7 +123,7 @@ seed_choices() {
 GLYPHS=on
 TOOLS=prompt,jumper,typing,editor,review,files,github,statusline
 PROMPT_STYLE=pure
-TABS=agents,source code,local server,git review
+TABS=agents,source code,local server
 PROJECTS_DIR=$H/repos
 EOF
 }

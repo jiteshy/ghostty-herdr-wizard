@@ -189,7 +189,7 @@ test_selection_greys_out_herdr_hunk_when_node_is_too_old() {
   check "grep -q 'you have v20.19.2 (via nvm)' '$T/out'" "names the Node found"
   check "grep -q 'nvm install 22 && nvm use 22' '$T/out'" "with the command to fix it"
   check "grep -q 'then: bash .* --only review' '$T/out'" "and how to add it afterwards"
-  check "grep -q 'tab 4 stays a plain shell for now' '$T/out'" "and what that means for the tabs"
+  check "grep -q 'new workspaces get no git review tab for now' '$T/out'" "and what that means for the tabs"
   check "grep -qE '^ +lazygit +a git UI' '$T/out'" "lazygit is still on offer"
   cleanup
 }
@@ -223,7 +223,7 @@ test_review_stage_installs_hunk_then_its_keys_then_reloads() {
     "install, setup-keys, reload, in that order (got '$calls')"
   check "grep -qF '# BEGIN $HUNK' '$H/$CFG_REL'" "the plugin's keys are in the herdr config"
   check "grep -qx 'placement = \"overlay\"' '$H/.config/herdr/plugins/config/$HUNK/config.toml'" \
-    "hunk's review opens over tab 4's pane, not beside it"
+    "hunk's review opens over the review tab's pane, not beside it"
   check "journal_has PLUGIN $HUNK new" "the plugin is journaled as new"
   cleanup
 }
@@ -292,7 +292,7 @@ test_review_stage_skips_hunk_when_node_is_too_old() {
 test_no_default_tabs_leaves_hunk_placement_alone() {
   stage_setup v22.12.0
   review_run "DEFAULT_TABS=''; $WRITE_HERDR_CONFIG; stage_review"
-  check "[[ ! -e '$H/.config/herdr/plugins/config/$HUNK/config.toml' ]]" "no tab 4, so hunk keeps its own placement"
+  check "[[ ! -e '$H/.config/herdr/plugins/config/$HUNK/config.toml' ]]" "no review tab, so hunk keeps its own placement"
   cleanup
 }
 
